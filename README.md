@@ -148,7 +148,7 @@ You should see: `{"ok":true,"result":true}`
 ```
 VercelTelegramBot/
 ├── api/
-│   └── webhook.py      # All bot logic lives here
+│   └── index.py        # All bot logic lives here
 ├── .env.example        # Copy to .env for local dev (never commit .env)
 ├── .gitignore
 ├── requirements.txt
@@ -163,7 +163,7 @@ VercelTelegramBot/
 ```bash
 pip install -r requirements.txt
 cp .env.example .env    # fill in your real values
-flask --app api/webhook run --port 3000
+flask --app api/index run --port 3000
 ```
 
 To test with Telegram locally, install [ngrok](https://ngrok.com), then:
@@ -180,9 +180,9 @@ Copy the `https://...ngrok-free.app` URL and re-run the `setWebhook` curl from S
 
 | What to change | Where |
 |---|---|
-| Bot personality / instructions | `SYSTEM_PROMPT` in `api/webhook.py` |
-| AI model | `MODEL` in `api/webhook.py` |
-| Conversation memory length | `MAX_HISTORY` in `api/webhook.py` |
+| Bot personality / instructions | `SYSTEM_PROMPT` in `api/index.py` |
+| AI model | `MODEL` in `api/index.py` |
+| Conversation memory length | `MAX_HISTORY` in `api/index.py` |
 | Add a new command | Add a `@bot.message_handler(commands=["yourcommand"])` function |
 
 ---
