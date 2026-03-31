@@ -13,7 +13,7 @@ A minimal Python Telegram bot running on Vercel (free tier) with persistent conv
 | Service | Purpose | Free tier |
 |---|---|---|
 | [Telegram](https://telegram.org) | The bot platform | Always free |
-| [Cerebras](https://cloud.cerebras.ai) | AI API (llama-3.3-70b) | 1M tokens/day, 30 req/min |
+| [Cerebras](https://cloud.cerebras.ai) | AI API (llama3.1-8b) | 1M tokens/day, 30 req/min |
 | [Upstash](https://upstash.com) | Redis for conversation memory | 10,000 req/day |
 | [Vercel](https://vercel.com) | Hosting the bot | 100GB bandwidth/month |
 | [GitHub](https://github.com) | Source code (Vercel deploys from here) | Always free |
@@ -38,6 +38,8 @@ A minimal Python Telegram bot running on Vercel (free tier) with persistent conv
 4. Click **Create new API key**, give it a name
 5. Copy the key (looks like `csk-...`)
 6. Save it — you will need it later
+
+> **Using a different provider?** Any OpenAI-compatible API works. Set `AI_API_KEY` to your provider's key, `AI_BASE_URL` to their base URL, and `AI_MODEL` to the model name.
 
 ---
 
@@ -110,7 +112,7 @@ Run each command below and paste the corresponding value when prompted:
 
 ```bash
 vercel env add TELEGRAM_BOT_TOKEN
-vercel env add CEREBRAS_API_KEY
+vercel env add AI_API_KEY
 vercel env add UPSTASH_REDIS_REST_URL
 vercel env add UPSTASH_REDIS_REST_TOKEN
 ```

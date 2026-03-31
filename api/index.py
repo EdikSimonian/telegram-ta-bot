@@ -6,8 +6,8 @@ from openai import OpenAI
 from upstash_redis import Redis
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
-CEREBRAS_API_KEY = os.environ["CEREBRAS_API_KEY"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+AI_API_KEY     = os.environ["AI_API_KEY"]
 UPSTASH_URL     = os.environ["UPSTASH_REDIS_REST_URL"]
 UPSTASH_TOKEN   = os.environ["UPSTASH_REDIS_REST_TOKEN"]
 
@@ -18,7 +18,7 @@ MAX_HISTORY   = 20  # number of messages kept per user (10 conversation turns)
 
 # ── Clients ────────────────────────────────────────────────────────────────────
 bot   = telebot.TeleBot(TELEGRAM_TOKEN, threaded=False)
-ai    = OpenAI(base_url=AI_BASE_URL, api_key=CEREBRAS_API_KEY)
+ai    = OpenAI(base_url=AI_BASE_URL, api_key=AI_API_KEY)
 redis = Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
 app   = Flask(__name__)
 
