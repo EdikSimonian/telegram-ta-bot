@@ -1,0 +1,4 @@
+flask
+pyTelegramBotAPI
+openai
+upstash-redis
