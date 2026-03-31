@@ -17,6 +17,7 @@ A minimal Python Telegram bot running on Vercel (free tier) with persistent conv
 | [Upstash](https://upstash.com) | Redis for conversation memory | 10,000 req/day |
 | [Vercel](https://vercel.com) | Hosting the bot | 100GB bandwidth/month |
 | [GitHub](https://github.com) | Source code (Vercel deploys from here) | Always free |
+| [Brave Search](https://api.search.brave.com) | Web search *(optional)* | 2,000 searches/month |
 
 ---
 
@@ -127,6 +128,23 @@ vercel --prod
 
 ---
 
+## Step 7b — Enable web search *(optional)*
+
+The bot can search the web automatically when it needs current information.
+
+1. Go to [api.search.brave.com](https://api.search.brave.com) and sign up (free, no credit card)
+2. Click **API Keys** → **Create API Key**
+3. Copy the key and add it to Vercel:
+
+```bash
+vercel env add BRAVE_API_KEY --value "your_key_here" --force --yes
+vercel --prod
+```
+
+Safe search is always set to **strict**. Without this key the bot works normally — web search is simply disabled.
+
+---
+
 ## Step 8 — Register the Telegram webhook
 
 This tells Telegram where to send messages. Run the command below, replacing the placeholders:
@@ -151,8 +169,18 @@ You should see: `{"ok":true,"result":true}`
 ```
 VercelTelegramBot/
 ├── api/
-│   └── index.py        # All bot logic lives here
-├── .env.example        # Copy to .env for local dev (never commit .env)
+│   └── index.py          # Entry point — Flask app and webhook route only
+├── bot/
+│   ├── config.py         # All env vars and constants
+│   ├── clients.py        # bot, ai, redis instances
+│   ├── handlers.py       # Telegram commands — add new commands here
+│   ├── ai.py             # AI call with optional web search tool
+│   ├── search.py         # Brave Search integration
+│   ├── history.py        # Conversation memory (Redis)
+│   ├── rate_limit.py     # Per-user rate limiting
+│   └── helpers.py        # Utilities (send_reply, should_respond)
+├── tests/                # Unit tests
+├── .env.example          # Copy to .env for local dev (never commit .env)
 ├── .gitignore
 ├── requirements.txt
 ├── vercel.json
@@ -183,11 +211,12 @@ Copy the `https://...ngrok-free.app` URL and re-run the `setWebhook` curl from S
 
 | What to change | How |
 |---|---|
-| Bot personality / instructions | Edit `SYSTEM_PROMPT` in `api/index.py` |
+| Bot personality / instructions | Edit `SYSTEM_PROMPT` in `bot/config.py` |
 | AI model | Set `AI_MODEL` env var (e.g. `llama3.1-8b`, `gpt-oss-120b`) |
 | AI provider | Set `AI_BASE_URL` env var (any OpenAI-compatible endpoint) |
-| Conversation memory length | Edit `MAX_HISTORY` in `api/index.py` |
-| Add a new command | Add a `@bot.message_handler(commands=["yourcommand"])` function |
+| Enable web search | Set `BRAVE_API_KEY` env var (from api.search.brave.com) |
+| Conversation memory length | Edit `MAX_HISTORY` in `bot/config.py` |
+| Add a new command | Add a handler in `bot/handlers.py` |
 
 ---
 
