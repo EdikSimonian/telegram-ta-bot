@@ -11,7 +11,7 @@ CEREBRAS_API_KEY = os.environ["CEREBRAS_API_KEY"]
 UPSTASH_URL     = os.environ["UPSTASH_REDIS_REST_URL"]
 UPSTASH_TOKEN   = os.environ["UPSTASH_REDIS_REST_TOKEN"]
 
-MODEL         = os.environ.get("AI_MODEL", "gpt-oss-120b")
+MODEL         = os.environ.get("AI_MODEL", "llama3.1-8b")
 AI_BASE_URL   = os.environ.get("AI_BASE_URL", "https://api.cerebras.ai/v1")
 SYSTEM_PROMPT = "You are a helpful assistant."
 MAX_HISTORY   = 20  # number of messages kept per user (10 conversation turns)
