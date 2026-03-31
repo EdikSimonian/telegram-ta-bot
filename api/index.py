@@ -86,7 +86,7 @@ def handle_message(message):
         bot.reply_to(message, reply)
     except Exception as e:
         print(f"Error: {e}")
-        bot.reply_to(message, "Something went wrong. Please try again.")
+        bot.reply_to(message, f"Error: {e}")
 
 # ── Webhook endpoint ───────────────────────────────────────────────────────────
 @app.route("/api/webhook", methods=["POST"])
