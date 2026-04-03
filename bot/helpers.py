@@ -5,7 +5,7 @@ from bot.config import MAX_MSG_LEN
 def send_reply(message, text: str) -> None:
     """Split and send reply in chunks if over Telegram's 4096 char limit."""
     for i in range(0, len(text), MAX_MSG_LEN):
-        bot.reply_to(message, text[i:i + MAX_MSG_LEN], parse_mode="Markdown")
+        bot.send_message(message.chat.id, text[i:i + MAX_MSG_LEN], parse_mode="Markdown")
 
 
 def should_respond(message) -> bool:

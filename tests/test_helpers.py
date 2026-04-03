@@ -20,7 +20,7 @@ def test_send_reply_short_text():
             from bot.helpers import send_reply
             msg = make_message()
             send_reply(msg, "Hello!")
-            mock_bot.reply_to.assert_called_once_with(msg, "Hello!", parse_mode="Markdown")
+            mock_bot.send_message.assert_called_once_with(msg.chat.id, "Hello!", parse_mode="Markdown")
 
 
 def test_send_reply_splits_long_text():
@@ -30,7 +30,7 @@ def test_send_reply_splits_long_text():
                 from bot.helpers import send_reply
                 msg = make_message()
                 send_reply(msg, "A" * 25)
-                assert mock_bot.reply_to.call_count == 3
+                assert mock_bot.send_message.call_count == 3
 
 
 # ── should_respond ─────────────────────────────────────────────────────────────

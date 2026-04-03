@@ -49,8 +49,8 @@ def test_handle_message_rate_limited():
         from bot.handlers import handle_message
         handle_message(make_message())
         mock_ask.assert_not_called()
-        mock_bot.reply_to.assert_called_once()
-        assert "daily limit" in mock_bot.reply_to.call_args[0][1]
+        mock_bot.send_message.assert_called_once()
+        assert "daily limit" in mock_bot.send_message.call_args[0][1]
 
 
 def test_handle_message_sends_generic_error():
@@ -61,7 +61,7 @@ def test_handle_message_sends_generic_error():
          patch("bot.handlers.bot") as mock_bot:
         from bot.handlers import handle_message
         handle_message(make_message())
-        error_msg = mock_bot.reply_to.call_args[0][1]
+        error_msg = mock_bot.send_message.call_args[0][1]
         assert "Something went wrong" in error_msg
         assert "API key" not in error_msg
 
