@@ -168,16 +168,18 @@ def test_cmd_model_not_registered_without_hf_space_id():
     assert not hasattr(bot.handlers, "cmd_model")
 
 
-def test_handle_message_sends_typing():
+def test_handle_message_uses_keep_typing():
+    """handle_message should wrap ask_ai in the keep_typing context."""
     with patch("bot.handlers.should_respond", return_value=True), \
          patch("bot.handlers.is_rate_limited", return_value=False), \
          patch("bot.handlers.BOT_INFO", MagicMock(username="testbot")), \
          patch("bot.handlers.ask_ai", return_value="reply"), \
          patch("bot.handlers.send_reply"), \
-         patch("bot.handlers.bot") as mock_bot:
+         patch("bot.handlers.keep_typing") as mock_keep, \
+         patch("bot.handlers.bot"):
+        mock_keep.return_value.__enter__ = MagicMock(return_value=None)
+        mock_keep.return_value.__exit__ = MagicMock(return_value=None)
         from bot.handlers import handle_message
         msg = make_message()
         handle_message(msg)
-        typing_calls = [c for c in mock_bot.send_chat_action.call_args_list
-                        if c[0] == (456, "typing")]
-        assert len(typing_calls) == 2
+        mock_keep.assert_called_once_with(456)

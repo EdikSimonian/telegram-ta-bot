@@ -66,3 +66,53 @@ def test_should_respond_group_reply_to_other_user():
         from bot.helpers import should_respond
         msg = make_message(chat_type="group", reply_from_id=99)
         assert should_respond(msg) is False
+
+
+# ── keep_typing ────────────────────────────────────────────────────────────────
+
+def test_keep_typing_sends_typing_action():
+    with patch("bot.helpers.bot") as mock_bot, \
+         patch("bot.helpers.TYPING_REFRESH_SECONDS", 0.05):
+        from bot.helpers import keep_typing
+        with keep_typing(123):
+            pass  # exits immediately
+        # At least one typing action was sent before the context exited
+        typing_calls = [c for c in mock_bot.send_chat_action.call_args_list
+                        if c[0] == (123, "typing")]
+        assert len(typing_calls) >= 1
+
+
+def test_keep_typing_refreshes_while_block_runs():
+    import time
+    with patch("bot.helpers.bot") as mock_bot, \
+         patch("bot.helpers.TYPING_REFRESH_SECONDS", 0.05):
+        from bot.helpers import keep_typing
+        with keep_typing(123):
+            time.sleep(0.2)  # wait long enough for multiple refreshes
+        typing_calls = [c for c in mock_bot.send_chat_action.call_args_list
+                        if c[0] == (123, "typing")]
+        assert len(typing_calls) >= 2
+
+
+def test_keep_typing_stops_thread_on_exit():
+    import time
+    with patch("bot.helpers.bot") as mock_bot, \
+         patch("bot.helpers.TYPING_REFRESH_SECONDS", 0.05):
+        from bot.helpers import keep_typing
+        with keep_typing(123):
+            pass
+        count_at_exit = mock_bot.send_chat_action.call_count
+        time.sleep(0.15)
+        # No further calls after the context exits
+        assert mock_bot.send_chat_action.call_count == count_at_exit
+
+
+def test_keep_typing_swallows_errors():
+    """A failing typing call should not crash the generation path."""
+    with patch("bot.helpers.bot") as mock_bot, \
+         patch("bot.helpers.TYPING_REFRESH_SECONDS", 0.05):
+        mock_bot.send_chat_action.side_effect = Exception("Telegram down")
+        from bot.helpers import keep_typing
+        # Should not raise
+        with keep_typing(123):
+            pass

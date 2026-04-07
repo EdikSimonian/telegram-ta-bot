@@ -1,7 +1,7 @@
 from bot.clients import bot, BOT_INFO
 from bot.config import MODEL, RATE_LIMIT, HF_SPACE_ID
 from bot.ai import ask_ai
-from bot.helpers import send_reply, should_respond
+from bot.helpers import keep_typing, send_reply, should_respond
 from bot.history import clear_history
 from bot.preferences import get_provider, set_provider
 from bot.rate_limit import is_rate_limited
@@ -83,9 +83,8 @@ def handle_message(message):
         return
     text = (message.text or "").replace(f"@{BOT_INFO.username}", "").strip()
     try:
-        bot.send_chat_action(message.chat.id, "typing")
-        reply = ask_ai(message.from_user.id, text)
-        bot.send_chat_action(message.chat.id, "typing")
+        with keep_typing(message.chat.id):
+            reply = ask_ai(message.from_user.id, text)
         send_reply(message, reply)
     except Exception as e:
         print(f"Error in handle_message: {e}")
