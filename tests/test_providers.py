@@ -43,29 +43,30 @@ def test_call_openai_succeeds_first_try():
         mock_sleep.assert_not_called()
 
 
-# ── _flatten_messages ─────────────────────────────────────────────────────────
+# ── _last_user_message ────────────────────────────────────────────────────────
 
-def test_flatten_messages_skips_system():
-    from bot.providers import _flatten_messages
-    result = _flatten_messages([
+def test_last_user_message_skips_system():
+    from bot.providers import _last_user_message
+    result = _last_user_message([
         {"role": "system", "content": "you are a bot"},
         {"role": "user", "content": "hi"},
     ])
-    assert "system" not in result.lower() or "bot" not in result
-    assert "User: hi" in result
-    assert result.endswith("Assistant:")
+    assert result == "hi"
 
 
-def test_flatten_messages_keeps_last_n_turns():
-    from bot.providers import _flatten_messages
+def test_last_user_message_returns_most_recent():
+    from bot.providers import _last_user_message
     messages = []
-    for i in range(10):
+    for i in range(5):
         messages.append({"role": "user", "content": f"u{i}"})
         messages.append({"role": "assistant", "content": f"a{i}"})
-    result = _flatten_messages(messages, turns=2)
-    # last 2 turns = last 4 messages: u8, a8, u9, a9
-    assert "u8" in result and "a8" in result and "u9" in result and "a9" in result
-    assert "u7" not in result
+    # No trailing user message — most recent user is u4
+    assert _last_user_message(messages) == "u4"
+
+
+def test_last_user_message_empty_when_no_user_turn():
+    from bot.providers import _last_user_message
+    assert _last_user_message([{"role": "system", "content": "x"}]) == ""
 
 
 # ── _strip_html ───────────────────────────────────────────────────────────────

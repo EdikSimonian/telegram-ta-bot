@@ -66,8 +66,9 @@ if HF_SPACE_ID:
             bot.send_message(
                 message.chat.id,
                 "Switched to hf (ArmGPT).\n\n"
-                "Note: this model only understands Armenian, takes ~10s per reply, "
-                "and does not remember past messages.",
+                "Note: this is a tiny base completion model trained only on Armenian text. "
+                "It will continue whatever you write rather than answer questions, "
+                "and it does not understand English. Replies take ~30-60s and there is no memory.",
             )
         else:
             bot.send_message(message.chat.id, "Switched to openai (Cerebras).")

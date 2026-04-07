@@ -9,7 +9,6 @@ from bot.preferences import get_provider
 HF_LENGTH = 200
 HF_TEMPERATURE = 0.8
 HF_TOP_K = 40
-HF_HISTORY_TURNS = 3  # last N turns flattened into the prompt
 
 
 def _call_openai(messages: list, retries: int = 3):
@@ -26,20 +25,17 @@ def _call_openai(messages: list, retries: int = 3):
             time.sleep(wait)
 
 
-def _flatten_messages(messages: list, turns: int = HF_HISTORY_TURNS) -> str:
-    """Flatten the last N turns of a messages array into a single prompt string.
+def _last_user_message(messages: list) -> str:
+    """Return only the most recent user message.
 
-    Skips system messages. ArmGPT has no concept of roles, so we use simple
-    "User:" / "Assistant:" labels.
+    ArmGPT is a base completion model trained on raw Armenian text — it has
+    no concept of chat turns. Feeding it a "User: ...\\nAssistant:" transcript
+    just confuses it. Pass the bare user prompt and let the model continue.
     """
-    convo = [m for m in messages if m.get("role") in ("user", "assistant")]
-    convo = convo[-(turns * 2):]  # each turn = user + assistant
-    lines = []
-    for m in convo:
-        label = "User" if m["role"] == "user" else "Assistant"
-        lines.append(f"{label}: {m['content']}")
-    lines.append("Assistant:")
-    return "\n".join(lines)
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return m.get("content", "")
+    return ""
 
 
 def _strip_html(text: str) -> str:
@@ -51,7 +47,7 @@ def _call_hf(messages: list) -> str:
     """Call the Hugging Face Gradio space. No retry — HF is slow."""
     from gradio_client import Client
 
-    prompt = _flatten_messages(messages)
+    prompt = _last_user_message(messages)
     client = Client(HF_SPACE_ID)
     result = client.predict(
         prompt,
