@@ -110,6 +110,49 @@ def test_ask_ai_skips_search_for_armgpt_provider():
         assert "Sources" not in reply
 
 
+def test_ask_ai_armgpt_does_not_send_history():
+    """ArmGPT is stateless — only the current user message + system prompt are sent."""
+    prior_history = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    with patch("bot.ai.generate", return_value="reply") as mock_gen, \
+         patch("bot.ai.get_history", return_value=list(prior_history)), \
+         patch("bot.ai.save_history"), \
+         patch("bot.ai.get_provider", return_value="armgpt"):
+        from bot.ai import ask_ai
+        ask_ai(123, "new question")
+        sent_messages = mock_gen.call_args[0][1]
+        # Only system prompt + current user message
+        assert len(sent_messages) == 2
+        assert sent_messages[0]["role"] == "system"
+        assert sent_messages[1] == {"role": "user", "content": "new question"}
+        # No traces of the old conversation
+        assert all("old question" not in m.get("content", "") for m in sent_messages)
+        assert all("old answer" not in m.get("content", "") for m in sent_messages)
+
+
+def test_ask_ai_openai_still_sends_history():
+    """openai must still receive history so multi-turn conversations work."""
+    prior_history = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    with patch("bot.ai.generate", return_value="reply") as mock_gen, \
+         patch("bot.ai.get_history", return_value=list(prior_history)), \
+         patch("bot.ai.save_history"), \
+         patch("bot.ai.get_provider", return_value="openai"):
+        from bot.ai import ask_ai
+        ask_ai(123, "new question")
+        sent_messages = mock_gen.call_args[0][1]
+        # system + 2 prior + current user = 4
+        assert len(sent_messages) == 4
+        contents = [m["content"] for m in sent_messages]
+        assert "old question" in contents
+        assert "old answer" in contents
+        assert "new question" in contents
+
+
 def test_ask_ai_passes_user_id_to_generate():
     with patch("bot.ai.generate", return_value="hi") as mock_gen, \
          patch("bot.ai.get_history", return_value=[]), \

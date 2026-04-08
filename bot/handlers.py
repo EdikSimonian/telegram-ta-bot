@@ -16,7 +16,7 @@ print(f"[handlers] enabled_providers={enabled_providers()} model_cmd_enabled={_M
 _PROVIDER_LABELS = {
     "openai": "Cerebras (fast, multilingual, with memory)",
     "hf": "ArmGPT on Hugging Face (Armenian only, slow ~30s, no memory)",
-    "armgpt": "ArmGPT on Modal (Armenian only, fast ~3s, with memory)",
+    "armgpt": "ArmGPT on Modal (Armenian only, fast ~3s, no memory)",
 }
 
 
@@ -86,8 +86,8 @@ if _MODEL_COMMAND_ENABLED:
             bot.send_message(
                 message.chat.id,
                 "Switched to armgpt (ArmGPT on Modal).\n\n"
-                "Note: this model only understands Armenian. Replies are fast (~3s) "
-                "and conversation history is preserved.",
+                "Note: this model only understands Armenian, replies are fast (~3s), "
+                "and each message is treated independently (no conversation memory).",
             )
         elif choice == "hf":
             bot.send_message(

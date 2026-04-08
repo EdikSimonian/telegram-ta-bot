@@ -43,7 +43,12 @@ def ask_ai(user_id: int, user_message: str) -> str:
         except Exception as e:
             print(f"Search error: {e}")
 
-    messages += history
+    # ArmGPT (Modal) is stateless — only send the current turn, not history.
+    # We still load+save history above so switching back to openai keeps continuity.
+    if provider == "armgpt":
+        messages.append({"role": "user", "content": user_message})
+    else:
+        messages += history
 
     reply = generate(user_id, messages)
 
