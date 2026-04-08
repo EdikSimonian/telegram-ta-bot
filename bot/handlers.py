@@ -1,10 +1,22 @@
 from bot.clients import bot, BOT_INFO
-from bot.config import MODEL, RATE_LIMIT, HF_SPACE_ID
+from bot.config import (
+    MODEL, RATE_LIMIT, HF_SPACE_ID, ARMGPT_BASE_URL, ARMGPT_API_KEY, ARMGPT_MODEL,
+)
 from bot.ai import ask_ai
 from bot.helpers import keep_typing, send_reply, should_respond
 from bot.history import clear_history
-from bot.preferences import get_provider, set_provider
+from bot.preferences import enabled_providers, get_provider, set_provider
 from bot.rate_limit import is_rate_limited
+
+# /model is only useful when at least one alternative provider is configured
+_MODEL_COMMAND_ENABLED = len(enabled_providers()) > 1
+
+# Per-provider description shown in /model
+_PROVIDER_LABELS = {
+    "openai": "Cerebras (fast, multilingual, with memory)",
+    "hf": "ArmGPT on Hugging Face (Armenian only, slow ~30s, no memory)",
+    "armgpt": "ArmGPT on Modal (Armenian only, fast ~3s, with memory)",
+}
 
 
 @bot.message_handler(commands=["start"])
@@ -20,7 +32,7 @@ def cmd_help(message):
         "/reset — clear conversation history",
         "/about — about this bot",
     ]
-    if HF_SPACE_ID:
+    if _MODEL_COMMAND_ENABLED:
         lines.append("/model — switch AI provider")
     bot.send_message(message.chat.id, "\n".join(lines))
 
@@ -33,39 +45,53 @@ def cmd_reset(message):
 
 @bot.message_handler(commands=["about"])
 def cmd_about(message):
-    if HF_SPACE_ID:
+    if _MODEL_COMMAND_ENABLED:
         provider = get_provider(message.from_user.id)
-        model_line = f"{MODEL} (openai)" if provider == "openai" else f"{HF_SPACE_ID} (hf)"
+        if provider == "openai":
+            model_line = f"{MODEL} (openai)"
+        elif provider == "hf":
+            model_line = f"{HF_SPACE_ID} (hf)"
+        elif provider == "armgpt":
+            model_line = f"{ARMGPT_MODEL} (armgpt)"
+        else:
+            model_line = MODEL
     else:
         model_line = MODEL
     bot.send_message(message.chat.id, f"Model  : {model_line}\nStorage: Upstash Redis\nHosting: Vercel")
 
 
-if HF_SPACE_ID:
+if _MODEL_COMMAND_ENABLED:
     @bot.message_handler(commands=["model"])
     def cmd_model(message):
+        available = enabled_providers()
         parts = (message.text or "").split(maxsplit=1)
         if len(parts) == 1:
             current = get_provider(message.from_user.id)
+            options = "\n".join(f"/model {p} — {_PROVIDER_LABELS[p]}" for p in available)
             bot.send_message(
                 message.chat.id,
-                f"Current provider: {current}\n\n"
-                "Options:\n"
-                "/model openai — Cerebras (fast, multilingual, with memory)\n"
-                "/model hf — ArmGPT (Armenian only, slow, no memory)",
+                f"Current provider: {current}\n\nOptions:\n{options}",
             )
             return
         choice = parts[1].strip().lower()
-        if choice not in ("openai", "hf"):
-            bot.send_message(message.chat.id, "Invalid choice. Use: /model openai or /model hf")
+        if choice not in available:
+            valid = ", ".join(available)
+            bot.send_message(message.chat.id, f"Invalid choice. Use one of: {valid}")
             return
         if not set_provider(message.from_user.id, choice):
             bot.send_message(message.chat.id, "Could not save preference. Try again later.")
             return
-        if choice == "hf":
+        if choice == "armgpt":
             bot.send_message(
                 message.chat.id,
-                "Switched to hf (ArmGPT).\n\n"
+                "Switched to armgpt (ArmGPT on Modal).\n\n"
+                "Note: this model only understands Armenian. Replies are fast (~3s) "
+                "and conversation history is preserved.",
+            )
+        elif choice == "hf":
+            bot.send_message(
+                message.chat.id,
+                "Switched to hf (ArmGPT on Hugging Face).\n\n"
                 "Note: this is a tiny base completion model trained only on Armenian text. "
                 "It will continue whatever you write rather than answer questions, "
                 "and it does not understand English. Replies take ~30-60s and there is no memory.",

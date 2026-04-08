@@ -94,6 +94,22 @@ def test_ask_ai_skips_search_for_hf_provider():
         assert "Sources" not in reply
 
 
+def test_ask_ai_skips_search_for_armgpt_provider():
+    """ArmGPT on Modal is also Armenian-only — same skip rule."""
+    sources = [{"title": "BBC", "url": "https://bbc.com"}]
+    with patch("bot.ai.generate", return_value="Հայաստան"), \
+         patch("bot.ai.get_history", return_value=[]), \
+         patch("bot.ai.save_history"), \
+         patch("bot.ai.get_provider", return_value="armgpt"), \
+         patch("bot.ai.TAVILY_API_KEY", "fake_key"), \
+         patch("bot.ai.needs_search", return_value=True), \
+         patch("bot.search.web_search", return_value=("search text", sources)) as mock_search:
+        from bot.ai import ask_ai
+        reply = ask_ai(123, "latest news")
+        mock_search.assert_not_called()
+        assert "Sources" not in reply
+
+
 def test_ask_ai_passes_user_id_to_generate():
     with patch("bot.ai.generate", return_value="hi") as mock_gen, \
          patch("bot.ai.get_history", return_value=[]), \

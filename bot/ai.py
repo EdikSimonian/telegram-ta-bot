@@ -25,9 +25,9 @@ def ask_ai(user_id: int, user_message: str) -> str:
     provider = get_provider(user_id)
 
     sources = []
-    # Skip web search for the HF provider — ArmGPT is Armenian-only and
-    # English search results would just pollute its prompt.
-    if provider != "hf" and TAVILY_API_KEY and needs_search(user_message):
+    # Skip web search for Armenian-only providers — English search results
+    # would just pollute the prompt for ArmGPT (whether HF or Modal).
+    if provider not in ("hf", "armgpt") and TAVILY_API_KEY and needs_search(user_message):
         try:
             from bot.search import web_search
             results, sources = web_search(user_message)

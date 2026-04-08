@@ -122,23 +122,72 @@ def test_call_hf_no_retry_on_failure():
             assert mock_client.predict.call_count == 1
 
 
+# ── _call_armgpt ──────────────────────────────────────────────────────────────
+
+def test_call_armgpt_uses_modal_client():
+    mock_response = MagicMock()
+    mock_response.choices[0].message.content = "Բարև"
+    with patch("bot.providers.armgpt") as mock_armgpt, \
+         patch("bot.providers.ARMGPT_MODEL", "armgpt"), \
+         patch("bot.providers.ARMGPT_MAX_TOKENS", 200):
+        mock_armgpt.chat.completions.create.return_value = mock_response
+        from bot.providers import _call_armgpt
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "Բարև"},
+        ]
+        assert _call_armgpt(messages) == "Բարև"
+        kwargs = mock_armgpt.chat.completions.create.call_args[1]
+        assert kwargs["model"] == "armgpt"
+        assert kwargs["max_tokens"] == 200
+        assert kwargs["messages"] == messages  # full history sent through
+
+
+def test_call_armgpt_no_retry_on_failure():
+    with patch("bot.providers.armgpt") as mock_armgpt:
+        mock_armgpt.chat.completions.create.side_effect = Exception("modal down")
+        from bot.providers import _call_armgpt
+        try:
+            _call_armgpt([{"role": "user", "content": "hi"}])
+            assert False, "Should have raised"
+        except Exception as e:
+            assert "modal down" in str(e)
+        assert mock_armgpt.chat.completions.create.call_count == 1
+
+
 # ── generate dispatch ─────────────────────────────────────────────────────────
 
 def test_generate_dispatches_to_openai():
     with patch("bot.providers.get_provider", return_value="openai"), \
          patch("bot.providers._call_openai", return_value="openai reply") as mock_openai, \
-         patch("bot.providers._call_hf") as mock_hf:
+         patch("bot.providers._call_hf") as mock_hf, \
+         patch("bot.providers._call_armgpt") as mock_armgpt:
         from bot.providers import generate
         assert generate(123, [{"role": "user", "content": "hi"}]) == "openai reply"
         mock_openai.assert_called_once()
         mock_hf.assert_not_called()
+        mock_armgpt.assert_not_called()
 
 
 def test_generate_dispatches_to_hf():
     with patch("bot.providers.get_provider", return_value="hf"), \
          patch("bot.providers._call_openai") as mock_openai, \
-         patch("bot.providers._call_hf", return_value="hf reply") as mock_hf:
+         patch("bot.providers._call_hf", return_value="hf reply") as mock_hf, \
+         patch("bot.providers._call_armgpt") as mock_armgpt:
         from bot.providers import generate
         assert generate(123, [{"role": "user", "content": "hi"}]) == "hf reply"
         mock_hf.assert_called_once()
         mock_openai.assert_not_called()
+        mock_armgpt.assert_not_called()
+
+
+def test_generate_dispatches_to_armgpt():
+    with patch("bot.providers.get_provider", return_value="armgpt"), \
+         patch("bot.providers._call_openai") as mock_openai, \
+         patch("bot.providers._call_hf") as mock_hf, \
+         patch("bot.providers._call_armgpt", return_value="armgpt reply") as mock_armgpt:
+        from bot.providers import generate
+        assert generate(123, [{"role": "user", "content": "hi"}]) == "armgpt reply"
+        mock_armgpt.assert_called_once()
+        mock_openai.assert_not_called()
+        mock_hf.assert_not_called()

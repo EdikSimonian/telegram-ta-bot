@@ -9,8 +9,14 @@ AI_API_KEY  = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.cerebras.ai/v1").strip()
 MODEL       = os.environ.get("AI_MODEL", "llama3.1-8b").strip()
 
-# Hugging Face provider (optional) — when set, users can switch via /model
+# Hugging Face provider (optional) — Gradio space, when set users can pick via /model
 HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()
+
+# ArmGPT on Modal (optional) — OpenAI-compatible endpoint, when set users can pick via /model
+ARMGPT_BASE_URL = os.environ.get("ARMGPT_BASE_URL", "").strip()
+ARMGPT_API_KEY  = os.environ.get("ARMGPT_API_KEY", "").strip()
+ARMGPT_MODEL    = os.environ.get("ARMGPT_MODEL", "armgpt").strip()
+
 DEFAULT_PROVIDER = "openai"
 
 # Redis

@@ -23,8 +23,8 @@ VercelTelegramBot/
 │   ├── config.py         # All env vars and constants (edit this to configure the bot)
 │   ├── clients.py        # Instantiates bot, ai, redis clients (do not edit unless adding a client)
 │   ├── ai.py             # ask_ai() orchestration — history, search injection, source citations
-│   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
-│   ├── preferences.py    # Per-user provider preference stored in Redis
+│   ├── providers.py      # Provider dispatch: OpenAI (Cerebras), ArmGPT (Modal), or HF Gradio
+│   ├── preferences.py    # Per-user provider preference stored in Redis (gated on enabled providers)
 │   ├── search.py         # Tavily web search with Redis result caching
 │   ├── history.py        # get/save/clear conversation history in Redis (graceful degradation)
 │   ├── rate_limit.py     # Per-user daily message rate limiting via Redis (graceful degradation)
@@ -76,7 +76,10 @@ VercelTelegramBot/
 | `AI_BASE_URL` | No | `https://api.cerebras.ai/v1` | Any OpenAI-compatible base URL |
 | `AI_MODEL` | No | `llama3.1-8b` | Model name for the provider |
 | `TAVILY_API_KEY` | No | — | From tavily.com — enables web search when set |
-| `HF_SPACE_ID` | No | — | Hugging Face Gradio space ID (e.g. `edisimon/armgpt-demo`) — enables `/model` command when set |
+| `HF_SPACE_ID` | No | — | Hugging Face Gradio space ID (e.g. `edisimon/armgpt-demo`) — enables HF as a `/model` choice |
+| `ARMGPT_BASE_URL` | No | — | OpenAI-compatible base URL for ArmGPT on Modal — enables ArmGPT as a `/model` choice |
+| `ARMGPT_API_KEY` | No | — | Bearer token for the Modal endpoint (paired with `ARMGPT_BASE_URL`) |
+| `ARMGPT_MODEL` | No | `armgpt` | Model id sent to the Modal endpoint |
 | `WEBHOOK_SECRET` | No | — | Random string to verify requests come from Telegram |
 | `RATE_LIMIT` | No | `50` | Max messages per user per day |
 
@@ -125,28 +128,27 @@ vercel --prod
 
 ## Multi-provider support
 
-The bot can dispatch requests to one of two providers per user:
+The bot can dispatch requests to one of three providers per user:
 
-1. **`openai`** (default) — any OpenAI-compatible endpoint via `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL`. Has retry logic (3 attempts with exponential backoff).
-2. **`hf`** (optional) — a Hugging Face Gradio space set via `HF_SPACE_ID`. Called via `gradio_client.Client(...).predict(prompt, length, temperature, top_k)`. No retry (HF is slow).
+1. **`openai`** (default, always enabled) — any OpenAI-compatible endpoint via `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL`. Retries 3× with exponential backoff.
+2. **`armgpt`** (optional) — ArmGPT served from a Modal.com endpoint via `ARMGPT_BASE_URL` + `ARMGPT_API_KEY`. OpenAI-compatible, fast (~3s), supports messages array and history. No retry.
+3. **`hf`** (optional) — ArmGPT on a Hugging Face Gradio space via `HF_SPACE_ID`. Called via `gradio_client.Client(...).predict(prompt, length, temperature, top_k)`. Slow (~30–60s), no message format, no history. No retry.
 
-**When `HF_SPACE_ID` is empty, the bot works exactly as before** — the `/model` command is not registered and users always hit the OpenAI-compatible endpoint.
+**When neither alternate provider is configured, the bot works exactly as before** — the `/model` command is not registered, `/help` doesn't list it, and users always hit the OpenAI-compatible endpoint.
 
-**When `HF_SPACE_ID` is set**, users get a `/model` command:
-- `/model` — show current provider + options
-- `/model openai` — switch to the OpenAI-compatible endpoint
-- `/model hf` — switch to the HF space
+**When at least one alternate is configured**, users get a `/model` command:
+- `/model` — show current provider + the available options
+- `/model <name>` — switch to one of the enabled providers
 
-Preferences are stored in Redis under `provider:{user_id}` (no TTL). If Redis is down, the bot falls back to `DEFAULT_PROVIDER` (`"openai"`).
+`bot/preferences.py::enabled_providers()` returns the set of currently enabled providers based on env vars. The handler dynamically lists only those.
 
-**HF provider caveats** — the current target (`edisimon/armgpt-demo`, ArmGPT) has:
-- No messages array — `bot/providers.py::_flatten_messages` flattens the last 3 turns into a `"User: ...\nAssistant: ..."` prompt string
-- No system prompt support — the system prompt is dropped entirely for HF
-- Hardcoded knobs — length=150, temperature=0.8, top_k=40
-- No web search — `bot/ai.py::ask_ai` skips Tavily injection when provider is `hf` (the ArmGPT model is Armenian-only; English search results would just pollute the prompt)
-- Cold start on free HF tier can take 30–60s while the model downloads
+Preferences are stored in Redis under `provider:{user_id}` (no TTL). If Redis is down OR a saved provider is no longer enabled (env var was removed), the bot falls back to `DEFAULT_PROVIDER` (`"openai"`).
 
-To switch to a different HF space, change `HF_SPACE_ID` and confirm the target space exposes a `/generate` API with the same signature, or adapt `_call_hf` in `bot/providers.py`.
+**Why `armgpt` and `hf` skip web search** — both serve the same Armenian-only model. English search results would just pollute the prompt. `bot/ai.py::ask_ai` checks the provider and skips Tavily injection for either.
+
+**`armgpt` (Modal) details** — `bot/providers.py::_call_armgpt` calls a second OpenAI client (`bot/clients.py::armgpt`, instantiated only when both env vars are set) with `max_tokens=ARMGPT_MAX_TOKENS` (200). It sends the full messages array — system prompt, history, and user message — letting the Modal wrapper handle the prompt formatting.
+
+**`hf` (Gradio) details** — `bot/providers.py::_call_hf` calls the Gradio space's `/generate` API with only the latest user message (the model is a base completion model with no chat format awareness). Hardcoded knobs: length=80, temperature=0.8, top_k=40. The 80-token cap exists because cold-start + generation must finish inside Telegram's ~60s webhook timeout.
 
 ---
 

@@ -1,16 +1,18 @@
 import re
 import time
-from bot.clients import ai
-from bot.config import MODEL, HF_SPACE_ID
+from bot.clients import ai, armgpt
+from bot.config import MODEL, HF_SPACE_ID, ARMGPT_MODEL
 from bot.preferences import get_provider
 
-# HF Gradio knobs — hardcoded defaults for ArmGPT
+# HF Gradio knobs — hardcoded defaults for the ArmGPT Hugging Face space
 # 80 tokens at ~5 tok/s ≈ 16s. Must finish well inside Telegram's webhook
-# timeout (~60s) accounting for HF cold-start jitter, network round-trips,
-# and the Vercel 60s function cap.
+# timeout (~60s) accounting for HF cold-start jitter and Vercel function cap.
 HF_LENGTH = 80
 HF_TEMPERATURE = 0.8
 HF_TOP_K = 40
+
+# ArmGPT (Modal) — OpenAI-compatible, fast (~3s), supports messages array
+ARMGPT_MAX_TOKENS = 200
 
 
 def _call_openai(messages: list, retries: int = 3):
@@ -71,9 +73,21 @@ def _call_hf(messages: list) -> str:
     return text or "(empty response from ArmGPT)"
 
 
+def _call_armgpt(messages: list) -> str:
+    """Call the ArmGPT Modal endpoint (OpenAI-compatible). No retry — fail loud."""
+    response = armgpt.chat.completions.create(
+        model=ARMGPT_MODEL,
+        messages=messages,
+        max_tokens=ARMGPT_MAX_TOKENS,
+    )
+    return response.choices[0].message.content
+
+
 def generate(user_id: int, messages: list) -> str:
     """Dispatch to the user's chosen AI provider and return a reply string."""
     provider = get_provider(user_id)
+    if provider == "armgpt":
+        return _call_armgpt(messages)
     if provider == "hf":
         return _call_hf(messages)
     return _call_openai(messages)
