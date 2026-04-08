@@ -75,17 +75,21 @@ def _call_hf(messages: list) -> str:
 
 def _call_armgpt(messages: list) -> str:
     """Call the ArmGPT Modal endpoint (OpenAI-compatible). No retry — fail loud."""
+    t0 = time.time()
+    print(f"[armgpt] calling Modal endpoint, max_tokens={ARMGPT_MAX_TOKENS}")
     response = armgpt.chat.completions.create(
         model=ARMGPT_MODEL,
         messages=messages,
         max_tokens=ARMGPT_MAX_TOKENS,
     )
+    print(f"[armgpt] Modal returned in {time.time()-t0:.1f}s")
     return response.choices[0].message.content
 
 
 def generate(user_id: int, messages: list) -> str:
     """Dispatch to the user's chosen AI provider and return a reply string."""
     provider = get_provider(user_id)
+    print(f"[providers] user={user_id} provider={provider}")
     if provider == "armgpt":
         return _call_armgpt(messages)
     if provider == "hf":
