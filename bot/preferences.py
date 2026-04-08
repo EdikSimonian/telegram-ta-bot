@@ -32,12 +32,15 @@ def get_provider(user_id: int) -> str:
     try:
         value = redis.get(f"provider:{user_id}")
     except Exception as e:
-        print(f"Redis read error (preferences): {e}")
+        print(f"[prefs] redis read error for user={user_id}: {e}")
         return DEFAULT_PROVIDER
     if value not in VALID_PROVIDERS:
+        print(f"[prefs] user={user_id} stored={value!r} -> default (invalid)")
         return DEFAULT_PROVIDER
     if not _is_provider_enabled(value):
+        print(f"[prefs] user={user_id} stored={value!r} -> default (provider disabled)")
         return DEFAULT_PROVIDER
+    print(f"[prefs] user={user_id} stored={value!r} -> {value}")
     return value
 
 
@@ -47,12 +50,15 @@ def set_provider(user_id: int, provider: str) -> bool:
     Rejects providers that are not currently enabled in this deployment.
     """
     if provider not in VALID_PROVIDERS:
+        print(f"[prefs] set_provider rejected: {provider!r} not in VALID_PROVIDERS")
         return False
     if not _is_provider_enabled(provider):
+        print(f"[prefs] set_provider rejected: {provider!r} not enabled (env vars missing)")
         return False
     try:
         redis.set(f"provider:{user_id}", provider)
+        print(f"[prefs] set_provider user={user_id} -> {provider}")
         return True
     except Exception as e:
-        print(f"Redis write error (preferences): {e}")
+        print(f"[prefs] redis write error for user={user_id}: {e}")
         return False

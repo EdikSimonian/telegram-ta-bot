@@ -10,6 +10,7 @@ from bot.rate_limit import is_rate_limited
 
 # /model is only useful when at least one alternative provider is configured
 _MODEL_COMMAND_ENABLED = len(enabled_providers()) > 1
+print(f"[handlers] enabled_providers={enabled_providers()} model_cmd_enabled={_MODEL_COMMAND_ENABLED}")
 
 # Per-provider description shown in /model
 _PROVIDER_LABELS = {
@@ -102,6 +103,7 @@ if _MODEL_COMMAND_ENABLED:
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
+    print(f"[handle_message] user={message.from_user.id} chat={message.chat.id} text={(message.text or '')[:60]!r}")
     if not should_respond(message):
         return
     if is_rate_limited(message.from_user.id):
