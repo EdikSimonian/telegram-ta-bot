@@ -1,7 +1,10 @@
 .env
+.env.prod
+.env.test
+.env.*.local
+.env.local
 __pycache__/
 *.pyc
 .vercel
 .venv
 .pytest_cache
-.env*.local

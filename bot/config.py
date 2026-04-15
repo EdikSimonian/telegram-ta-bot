@@ -1,37 +1,132 @@
 import os
 
-# Telegram
+# ── Telegram ──────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "").strip()  # optional, but recommended
+WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "").strip()
 
-# AI provider
+# ── LLM provider (OpenAI-compatible) ──────────────────────────────────────
 AI_API_KEY  = os.environ["AI_API_KEY"].strip()
-AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.cerebras.ai/v1").strip()
-MODEL       = os.environ.get("AI_MODEL", "llama3.1-8b").strip()
+AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.openai.com/v1").strip()
+MODEL       = os.environ.get("AI_MODEL", "gpt-5.4-nano").strip()
+QUIZ_MODEL  = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
 
-# Hugging Face provider (optional) — when set, users can switch via /model
+# Models the /model admin command will accept. Kept tight on purpose:
+# this deployment targets OpenAI direct, and invalid model IDs just cause
+# 404s at request time. Extend when you add a second provider.
+VALID_MODELS = [
+    "gpt-5.4-nano",
+    "gpt-5.4-mini",
+]
+DEFAULT_MODEL = MODEL
+
+# ── HF provider (legacy fallback; usually unset for TA bot) ───────────────
 HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()
-HF_TOKEN    = os.environ.get("HF_TOKEN", "").strip()  # optional, for private spaces
+HF_TOKEN    = os.environ.get("HF_TOKEN", "").strip()
 DEFAULT_PROVIDER = "main"
 
-# Redis — optional. When unset, history / rate limiting / preferences /
-# search-cache all degrade gracefully to stateless behavior. Good for
-# teaching and local dev where you don't want to wire up Upstash yet.
+# ── Upstash Redis (required for TA bot — stateful) ────────────────────────
 UPSTASH_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip()
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip()
+# Prefix prepended to every Redis key. Lets one shared Upstash Redis DB
+# host multiple bots (prod + test) without key collisions. Default "ta:"
+# keeps backwards compatibility with single-bot deployments. Override to
+# "ta:prod:" / "ta:test:" when sharing a DB.
+_raw_redis_prefix = os.environ.get("REDIS_PREFIX", "ta:").strip()
+REDIS_PREFIX = (_raw_redis_prefix.rstrip(":") + ":") if _raw_redis_prefix else "ta:"
 
-# Search
+# ── Upstash Vector (RAG) ──────────────────────────────────────────────────
+UPSTASH_VECTOR_URL   = os.environ.get("UPSTASH_VECTOR_REST_URL", "").strip()
+UPSTASH_VECTOR_TOKEN = os.environ.get("UPSTASH_VECTOR_REST_TOKEN", "").strip()
+# Upstash Vector has first-class namespaces: one index can host many
+# isolated corpora. Blank = default namespace. Use "prod" / "test" when
+# sharing an index.
+VECTOR_NAMESPACE = os.environ.get("VECTOR_NAMESPACE", "").strip()
+
+# ── Upstash QStash (delayed callbacks for quiz auto-reveal) ───────────────
+# Upstash exposes a generic endpoint and region-scoped endpoints (e.g.
+# https://qstash-us-east-1.upstash.io). Override via QSTASH_URL when the
+# console gives you a regional URL — keeps publish latency low.
+QSTASH_URL                 = os.environ.get("QSTASH_URL", "https://qstash.upstash.io").strip().rstrip("/")
+QSTASH_TOKEN               = os.environ.get("QSTASH_TOKEN", "").strip()
+QSTASH_CURRENT_SIGNING_KEY = os.environ.get("QSTASH_CURRENT_SIGNING_KEY", "").strip()
+QSTASH_NEXT_SIGNING_KEY    = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "").strip()
+
+# ── Vercel Blob ───────────────────────────────────────────────────────────
+BLOB_READ_WRITE_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip()
+# Prefix every blob path. Lets one shared Blob store back multiple bots
+# (prod + test) without collisions. Normalize to end with "/".
+_raw_prefix = os.environ.get("BLOB_PATH_PREFIX", "docs/").strip()
+BLOB_PATH_PREFIX = (_raw_prefix.rstrip("/") + "/") if _raw_prefix else "docs/"
+
+# ── Embeddings ────────────────────────────────────────────────────────────
+EMBEDDINGS_PROVIDER = os.environ.get("EMBEDDINGS_PROVIDER", "openai").strip().lower()
+EMBEDDINGS_MODEL    = os.environ.get("EMBEDDINGS_MODEL", "text-embedding-3-small").strip()
+
+# ── Search (optional) ─────────────────────────────────────────────────────
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
 
-# App
+# ── Deployment ────────────────────────────────────────────────────────────
+# Base URL used to build QStash callback targets. Prefer explicit PROD_URL
+# (no scheme stripping needed); fall back to VERCEL_URL which Vercel injects
+# without a scheme.
+PROD_URL = os.environ.get("PROD_URL", "").strip()
+_vercel_url = os.environ.get("VERCEL_URL", "").strip()
+def _normalize_public_url(raw: str) -> str:
+    raw = raw.strip().rstrip("/")
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return f"https://{raw}"
+
+PUBLIC_URL = _normalize_public_url(PROD_URL) or _normalize_public_url(_vercel_url)
+
+# ── Bot identity / policy ─────────────────────────────────────────────────
+# Label surfaced in /info and logs so you can tell which deployment is
+# answering when multiple bots share this codebase (prod vs test).
+BOT_ENV = os.environ.get("BOT_ENV", "").strip().lower() or "local"
+
+PERMANENT_ADMIN = os.environ.get("PERMANENT_ADMIN", "ediksimonian").strip().lower()
+
+# TA bot: per-student questions in a rolling window (student-facing limit).
+TA_RATE_LIMIT        = int(os.environ.get("TA_RATE_LIMIT", "10"))
+TA_RATE_LIMIT_WINDOW = int(os.environ.get("TA_RATE_LIMIT_WINDOW", "3600"))
+
+# Legacy hard daily cap (kept for the original polling runner).
+RATE_LIMIT = int(os.environ.get("RATE_LIMIT", "250"))
+
+QUIZ_TIMEOUT_MINUTES = int(os.environ.get("QUIZ_TIMEOUT_MINUTES", "3"))
+QUIZ_TIMEOUT_SECONDS = QUIZ_TIMEOUT_MINUTES * 60
+
+# ── App ───────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
-    "You are a knowledgeable and concise AI assistant. "
-    "Answer clearly and directly. Avoid unnecessary filler. "
-    "Keep responses appropriately brief for a chat interface. "
-    "When web search results are provided, treat them as current factual information and use them to answer the user's question. "
-    "Do not dispute or second-guess search results based on your training data — your training data may be outdated."
+    "You are the Teaching Assistant for the Summer 2026 AI Bot Workshop in "
+    "Armenia, led by Edik Simonian (@ediksimonian).\n\n"
+    "Architecture facts (always true, never contradict):\n"
+    "- This bot runs on Vercel Functions (Python) via webhook\n"
+    "- State lives in Upstash Redis\n"
+    "- RAG uses Upstash Vector with OpenAI embeddings\n"
+    "- Docs are stored in Vercel Blob\n"
+    "- Quiz auto-reveal uses Upstash QStash delayed queue\n\n"
+    "Answer students concisely using the course context below. If the context "
+    "does not cover the question, say so briefly and offer a best-effort answer "
+    "based on general knowledge, but mark it clearly. Never fabricate specifics "
+    "about the course architecture.\n\n"
+    "Special prefix handling:\n"
+    "- `[INSTRUCTOR @ediksimonian]:` → from the instructor, highest priority\n"
+    "- `[DIRECT]:` → bot was @-mentioned or message is DM\n"
+    "- `[REPLY_TO @user]:` → reply to another student, not the bot\n"
+    "- `[DM]:` → private chat context, no group history\n\n"
+    "Format: plain text, short paragraphs, prefer bullet points for lists. "
+    "No HTML unless asked."
 )
-MAX_HISTORY     = 20        # messages kept per user (10 conversation turns)
-HISTORY_TTL     = 2592000   # conversation history expires after 30 days (seconds)
-RATE_LIMIT      = int(os.environ.get("RATE_LIMIT", "250"))  # max messages per user per day
-MAX_MSG_LEN     = 4096      # Telegram's character limit per message
+MAX_HISTORY   = 20
+HISTORY_TTL   = 2592000   # 30 days
+MAX_MSG_LEN   = 4096
+TG_CHUNK_LEN  = 4000      # safety margin under Telegram's 4096 limit
+
+# RAG knobs
+RAG_CHUNK_SIZE     = 800
+RAG_CHUNK_OVERLAP  = 100
+RAG_TOP_K          = 5
+RAG_MIN_SCORE      = 0.6

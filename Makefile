@@ -1,4 +1,9 @@
-.PHONY: install test run deploy push
+.PHONY: install test run deploy push push-prod push-test deploy-prod deploy-test run-prod run-test
+
+# ENV_FILE defaults to .env (single-bot workflow). For dual-bot setups,
+# override via `make push ENV_FILE=.env.prod` — or use the dedicated
+# `push-prod`/`push-test` wrappers below.
+ENV_FILE ?= .env
 
 install:
 	python3 -m venv .venv
@@ -7,63 +12,83 @@ install:
 test:
 	.venv/bin/pytest tests/ -v
 
-# Run the bot locally via polling. Reads .env automatically. No Vercel
-# involved. Prompts before touching an already-registered webhook.
+# ── Local polling ─────────────────────────────────────────────────────────
+# Run the bot locally via polling using the selected env file. Does NOT
+# touch Vercel. Before starting it removes the webhook so Telegram routes
+# updates to polling instead of the deployed bot.
 run:
-	@test -f .env || { echo "ERROR: .env not found. Copy .env.example to .env first."; exit 1; }
-	.venv/bin/python run_local.py
+	@test -f $(ENV_FILE) || { echo "ERROR: $(ENV_FILE) not found. Copy the matching .env.*.example first."; exit 1; }
+	ENV_FILE=$(ENV_FILE) .venv/bin/python run_local.py
 
+run-prod:
+	$(MAKE) run ENV_FILE=.env.prod
+
+run-test:
+	$(MAKE) run ENV_FILE=.env.test
+
+# ── Deploy ────────────────────────────────────────────────────────────────
+# `vercel --prod` needs to know which project to deploy to. We source
+# VERCEL_ORG_ID + VERCEL_PROJECT_ID from the env file so a single repo can
+# deploy to multiple Vercel projects without swapping `.vercel/` folders.
 deploy:
-	vercel --prod
+	@test -f $(ENV_FILE) || { echo "ERROR: $(ENV_FILE) not found."; exit 1; }
+	@set -a; . ./$(ENV_FILE); set +a; \
+	if [ -z "$$VERCEL_PROJECT_ID" ] || [ -z "$$VERCEL_ORG_ID" ]; then \
+		echo "ERROR: VERCEL_ORG_ID and VERCEL_PROJECT_ID must be set in $(ENV_FILE)."; \
+		echo "Find them in Vercel dashboard → Project → Settings → General."; \
+		exit 1; \
+	fi; \
+	VERCEL_ORG_ID="$$VERCEL_ORG_ID" VERCEL_PROJECT_ID="$$VERCEL_PROJECT_ID" vercel --prod
 
-# Push every variable from .env to Vercel production AND register the
-# Telegram webhook. Two independent steps:
+deploy-prod:
+	$(MAKE) deploy ENV_FILE=.env.prod
+
+deploy-test:
+	$(MAKE) deploy ENV_FILE=.env.test
+
+# ── Push env vars + register webhook ──────────────────────────────────────
+# Two independent steps:
 #
 #   1. Env vars:  prompts "Update Vercel env vars? [y/N]". If yes, pushes
-#      every KEY=VALUE from .env to Vercel production, upserting in place
-#      via `vercel env add --force`. If no, skips the push and moves on.
+#      every KEY=VALUE from the selected env file to Vercel production,
+#      upserting via `vercel env add --force`. If no, skips.
 #
 #   2. Webhook:   registers the Telegram webhook at <PROD_URL>/api/webhook.
-#      Runs regardless of the answer to step 1, so you can re-register
-#      the webhook without re-pushing env vars.
+#      Runs regardless of step 1 so you can refresh the webhook alone.
 #
-# REQUIRED: PROD_URL must be set in .env. `make push` refuses to run
-# without it — there is no safe default, and a default would risk
-# accidentally pushing to the wrong production bot. If you haven't
-# deployed yet, run `vercel --prod` first to get a URL, then add it:
-#     PROD_URL=https://<your-bot-name>.vercel.app
+# REQUIRED in the env file:
+#   PROD_URL           — target Vercel URL
+#   VERCEL_ORG_ID      — from Vercel dashboard
+#   VERCEL_PROJECT_ID  — from Vercel dashboard
 #
-# SAFETY: `make push` is additive/upsert only. It NEVER deletes Vercel
-# env vars. Variables that exist on Vercel but are absent (or commented)
-# from .env are left untouched. To remove a var from Vercel, use
-# `vercel env rm NAME production --yes` directly.
-#
-# PROD_URL itself is local-only — it is NOT pushed to Vercel. Blank and
-# comment lines in .env are ignored. Surrounding quotes are stripped.
+# NEVER deletes Vercel vars. Skips comments, blanks, and the three keys
+# above (they are local-only orchestration metadata, not runtime vars).
 push:
-	@test -f .env || { echo "ERROR: .env not found. Copy .env.example to .env first."; exit 1; }
+	@test -f $(ENV_FILE) || { echo "ERROR: $(ENV_FILE) not found. Copy the matching .env.*.example first."; exit 1; }
 	@command -v vercel >/dev/null 2>&1 || { echo "ERROR: vercel CLI not installed. Run: npm i -g vercel"; exit 1; }
 	@command -v curl >/dev/null 2>&1 || { echo "ERROR: curl not installed."; exit 1; }
-	@grep -qE '^[[:space:]]*PROD_URL[[:space:]]*=.*[^[:space:]]' .env || { \
-		echo "ERROR: PROD_URL is not set (or is empty) in .env."; \
-		echo ""; \
-		echo "Add a line like this to .env before running 'make push':"; \
-		echo "    PROD_URL=https://<your-bot-name>.vercel.app"; \
-		echo ""; \
-		echo "PROD_URL is required so 'make push' knows which Vercel deployment"; \
-		echo "to register the Telegram webhook against. Without it there is no"; \
-		echo "safe default — refusing to run prevents accidentally pushing to"; \
-		echo "the wrong production bot."; \
+	@grep -qE '^[[:space:]]*PROD_URL[[:space:]]*=.*[^[:space:]]' $(ENV_FILE) || { \
+		echo "ERROR: PROD_URL is not set (or is empty) in $(ENV_FILE)."; \
+		echo "Add: PROD_URL=https://<your-bot>.vercel.app"; \
 		exit 1; \
 	}
-	@printf "Update Vercel env vars from .env? [y/N] "; read push_ans; case "$$push_ans" in y|Y|yes|YES) push_envs=1 ;; *) push_envs=0 ;; esac; \
+	@grep -qE '^[[:space:]]*VERCEL_PROJECT_ID[[:space:]]*=.*[^[:space:]]' $(ENV_FILE) || { \
+		echo "ERROR: VERCEL_PROJECT_ID is not set in $(ENV_FILE)."; \
+		exit 1; \
+	}
+	@grep -qE '^[[:space:]]*VERCEL_ORG_ID[[:space:]]*=.*[^[:space:]]' $(ENV_FILE) || { \
+		echo "ERROR: VERCEL_ORG_ID is not set in $(ENV_FILE)."; \
+		exit 1; \
+	}
+	@set -a; . ./$(ENV_FILE); set +a; \
+	export VERCEL_ORG_ID VERCEL_PROJECT_ID; \
+	printf "Push env vars from %s to Vercel project %s? [y/N] " "$(ENV_FILE)" "$$VERCEL_PROJECT_ID"; read push_ans; \
+	case "$$push_ans" in y|Y|yes|YES) push_envs=1 ;; *) push_envs=0 ;; esac; \
 	count=0; failed=0; tg_token=""; wh_secret=""; prod_url=""; \
 	if [ "$$push_envs" = "1" ]; then \
-		echo ""; \
-		echo "Pushing .env to Vercel production (existing values will be OVERWRITTEN)..."; \
+		echo ""; echo "Pushing $(ENV_FILE) → Vercel production (OVERWRITES existing)..."; \
 	else \
-		echo ""; \
-		echo "Skipping env var update."; \
+		echo ""; echo "Skipping env var update."; \
 	fi; \
 	while IFS= read -r line || [ -n "$$line" ]; do \
 		line=$$(printf '%s' "$$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$$//'); \
@@ -78,28 +103,23 @@ push:
 			TELEGRAM_BOT_TOKEN) tg_token="$$value" ;; \
 			WEBHOOK_SECRET) wh_secret="$$value" ;; \
 			PROD_URL) prod_url="$$value"; continue ;; \
+			VERCEL_ORG_ID|VERCEL_PROJECT_ID) continue ;; \
 		esac; \
 		if [ "$$push_envs" = "1" ]; then \
 			printf "  %-30s ... " "$$key"; \
 			if vercel env add "$$key" production --force --yes --value "$$value" </dev/null >/dev/null 2>&1; then \
-				echo "ok"; \
-				count=$$((count+1)); \
+				echo "ok"; count=$$((count+1)); \
 			else \
-				echo "FAILED"; \
-				failed=$$((failed+1)); \
+				echo "FAILED"; failed=$$((failed+1)); \
 			fi; \
 		fi; \
-	done < .env; \
-	if [ "$$push_envs" = "1" ]; then \
-		echo ""; \
-		echo "Pushed $$count variable(s). $$failed failed."; \
-	fi; \
+	done < $(ENV_FILE); \
+	if [ "$$push_envs" = "1" ]; then echo ""; echo "Pushed $$count variable(s). $$failed failed."; fi; \
 	echo ""; \
 	if [ -z "$$tg_token" ]; then \
-		echo "Skipping webhook registration: TELEGRAM_BOT_TOKEN not set in .env."; \
+		echo "Skipping webhook registration: TELEGRAM_BOT_TOKEN not set in $(ENV_FILE)."; \
 	else \
-		prod_url=$${prod_url%/}; \
-		webhook_url="$$prod_url/api/webhook"; \
+		prod_url=$${prod_url%/}; webhook_url="$$prod_url/api/webhook"; \
 		printf "Registering Telegram webhook → %s ... " "$$webhook_url"; \
 		if [ -n "$$wh_secret" ]; then \
 			response=$$(curl -s -X POST "https://api.telegram.org/bot$$tg_token/setWebhook" \
@@ -114,7 +134,10 @@ push:
 			*) echo "FAILED"; echo "  Telegram response: $$response" ;; \
 		esac; \
 	fi; \
-	if [ "$$push_envs" = "1" ]; then \
-		echo ""; \
-		echo "Run 'make deploy' to redeploy production with the new values."; \
-	fi
+	if [ "$$push_envs" = "1" ]; then echo ""; echo "Run 'make deploy ENV_FILE=$(ENV_FILE)' to redeploy."; fi
+
+push-prod:
+	$(MAKE) push ENV_FILE=.env.prod
+
+push-test:
+	$(MAKE) push ENV_FILE=.env.test

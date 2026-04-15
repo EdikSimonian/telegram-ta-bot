@@ -48,10 +48,11 @@ def load_dotenv(path: str = ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-# IMPORTANT: load .env BEFORE importing anything from bot/. bot.config
+# IMPORTANT: load the env file BEFORE importing anything from bot/. bot.config
 # reads environment variables at import time and will crash if any
-# required variable is missing.
-load_dotenv()
+# required variable is missing. Override the file via the ENV_FILE env var
+# (e.g. `ENV_FILE=.env.test python run_local.py`).
+load_dotenv(os.environ.get("ENV_FILE", ".env"))
 
 # Turn on verbose console logging for local dev. bot/handlers.py reads
 # this at import time and prints one line per inbound/outbound message.

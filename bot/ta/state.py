@@ -1,0 +1,480 @@
+"""Redis-backed state for the TA bot.
+
+All keys live under the ``ta:`` prefix. Every function degrades safely when
+Redis is unavailable (unconfigured or unreachable at runtime) — writes
+become no-ops, reads return empty/default values. Callers never need to
+null-check the client themselves.
+"""
+from __future__ import annotations
+
+import json
+import time
+from typing import Any
+
+from bot.clients import redis
+from bot.config import (
+    HISTORY_TTL,
+    PERMANENT_ADMIN,
+    REDIS_PREFIX,
+    TA_RATE_LIMIT_WINDOW,
+)
+
+# ── Keys ──────────────────────────────────────────────────────────────────
+# All keys are computed from REDIS_PREFIX so one Upstash DB can back many
+# bots (prod + test) without collisions. Defaults to "ta:" for single-bot
+# deployments; override via the REDIS_PREFIX env var (e.g. "ta:prod:").
+_P = REDIS_PREFIX
+
+K_ADMINS           = f"{_P}admins"
+K_USER_CHATS       = f"{_P}userChats"
+K_GROUPS           = f"{_P}groups"
+K_ACTIVE_GROUP     = f"{_P}activeGroupId"
+K_GROUP_WELCOMED   = f"{_P}groupWelcomed"
+K_DM_WELCOMED      = f"{_P}dmWelcomed"
+K_KNOWN_THREADS    = f"{_P}knownThreads"
+K_DOCS             = f"{_P}docs"
+
+QUIZ_HISTORY_CAP = 20
+
+
+def _k_rate(user_id: int | str) -> str:
+    return f"{_P}rate:{user_id}"
+
+
+def _k_rate_notified(user_id: int | str) -> str:
+    return f"{_P}rate-notified:{user_id}"
+
+
+def _k_history(group_key: str) -> str:
+    return f"{_P}history:{group_key}"
+
+
+def _k_stats(group_key: str) -> str:
+    return f"{_P}group:{group_key}:stats"
+
+
+def _k_scores(group_key: str) -> str:
+    return f"{_P}group:{group_key}:scores"
+
+
+def _k_total_quizzes(group_key: str) -> str:
+    return f"{_P}group:{group_key}:totalQuizzes"
+
+
+def _k_quiz_history(group_key: str) -> str:
+    return f"{_P}group:{group_key}:quizHistory"
+
+
+def _k_active_quiz(chat_id: int | str) -> str:
+    return f"{_P}activeQuiz:{chat_id}"
+
+
+def _k_pending_announcement(admin_id: int | str) -> str:
+    return f"{_P}pendingAnnouncement:{admin_id}"
+
+
+def _safe(op, default=None):
+    """Run a Redis op; log and return ``default`` on failure."""
+    if redis is None:
+        return default
+    try:
+        return op()
+    except Exception as e:
+        print(f"[ta.state] Redis error: {e}")
+        return default
+
+
+# ── Admins ────────────────────────────────────────────────────────────────
+def is_admin(username: str | None) -> bool:
+    if not username:
+        return False
+    uname = username.lstrip("@").lower()
+    if uname == PERMANENT_ADMIN:
+        return True
+    return bool(_safe(lambda: redis.sismember(K_ADMINS, uname), default=False))
+
+
+def list_admins() -> list[str]:
+    members = _safe(lambda: redis.smembers(K_ADMINS), default=set()) or set()
+    admins = {m.lower() for m in members if m}
+    admins.add(PERMANENT_ADMIN)
+    return sorted(admins)
+
+
+def add_admin(username: str) -> bool:
+    uname = username.lstrip("@").lower()
+    if not uname:
+        return False
+    if uname == PERMANENT_ADMIN:
+        return True
+    return bool(_safe(lambda: redis.sadd(K_ADMINS, uname), default=False))
+
+
+def remove_admin(username: str) -> bool:
+    """Remove an admin. Returns False when the target is the permanent admin."""
+    uname = username.lstrip("@").lower()
+    if not uname or uname == PERMANENT_ADMIN:
+        return False
+    _safe(lambda: redis.srem(K_ADMINS, uname), default=None)
+    return True
+
+
+# ── Username → userId map (populated as we observe users) ─────────────────
+def remember_user_chat(username: str | None, user_id: int | str) -> None:
+    if not username:
+        return
+    _safe(lambda: redis.hset(K_USER_CHATS, values={username.lstrip("@").lower(): str(user_id)}))
+
+
+def get_user_chat(username: str) -> str | None:
+    uname = username.lstrip("@").lower()
+    return _safe(lambda: redis.hget(K_USER_CHATS, uname), default=None)
+
+
+# ── Groups ────────────────────────────────────────────────────────────────
+def register_group(chat_id: int | str, title: str) -> None:
+    payload = json.dumps({"chatId": str(chat_id), "title": title})
+    _safe(lambda: redis.hset(K_GROUPS, values={str(chat_id): payload}))
+    # Set as active when there's no active group yet.
+    if not get_active_group_id():
+        set_active_group_id(chat_id)
+
+
+def unregister_group(chat_id: int | str) -> None:
+    _safe(lambda: redis.hdel(K_GROUPS, str(chat_id)))
+    _safe(lambda: redis.hdel(K_GROUP_WELCOMED, str(chat_id)))
+    active = get_active_group_id()
+    if active == str(chat_id):
+        remaining = list_groups()
+        if remaining:
+            set_active_group_id(remaining[0]["chatId"])
+        else:
+            _safe(lambda: redis.delete(K_ACTIVE_GROUP))
+
+
+def list_groups() -> list[dict]:
+    raw = _safe(lambda: redis.hgetall(K_GROUPS), default={}) or {}
+    out: list[dict] = []
+    for _, payload in raw.items() if isinstance(raw, dict) else []:
+        try:
+            out.append(json.loads(payload))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def get_active_group_id() -> str | None:
+    return _safe(lambda: redis.get(K_ACTIVE_GROUP), default=None)
+
+
+def set_active_group_id(chat_id: int | str) -> None:
+    _safe(lambda: redis.set(K_ACTIVE_GROUP, str(chat_id)))
+
+
+def mark_group_welcomed(chat_id: int | str, title: str) -> bool:
+    """Record that we've sent the group welcome. Returns True on first write."""
+    if redis is None:
+        return True  # stateless: just send the welcome
+    try:
+        existing = redis.hget(K_GROUP_WELCOMED, str(chat_id))
+        if existing:
+            return False
+        redis.hset(K_GROUP_WELCOMED, values={str(chat_id): title})
+        return True
+    except Exception as e:
+        print(f"[ta.state] mark_group_welcomed error: {e}")
+        return False
+
+
+def mark_dm_welcomed(user_id: int | str) -> bool:
+    """Record that we've DM'd a user. Returns True on first write."""
+    if redis is None:
+        return True
+    try:
+        added = redis.sadd(K_DM_WELCOMED, str(user_id))
+        return bool(added)
+    except Exception as e:
+        print(f"[ta.state] mark_dm_welcomed error: {e}")
+        return False
+
+
+# ── Rate limiter (TA-specific, rolling window) ────────────────────────────
+def ta_rate_check_and_inc(user_id: int | str, limit: int, window: int = TA_RATE_LIMIT_WINDOW) -> tuple[bool, int]:
+    """Increment the user's rolling-window counter.
+
+    Returns ``(allowed, remaining)``. If Redis is down we fail open.
+    """
+    if redis is None:
+        return True, limit
+    try:
+        key = _k_rate(user_id)
+        count = redis.incr(key)
+        if count == 1:
+            redis.expire(key, window)
+        if count > limit:
+            return False, 0
+        return True, max(0, limit - count)
+    except Exception as e:
+        print(f"[ta.state] rate_check error: {e}")
+        return True, limit
+
+
+def ta_rate_should_notify(user_id: int | str, window: int = TA_RATE_LIMIT_WINDOW) -> bool:
+    """True the first time in a window — used to notify once then stay silent."""
+    if redis is None:
+        return True
+    try:
+        key = _k_rate_notified(user_id)
+        added = redis.set(key, "1", nx=True, ex=window)
+        return bool(added)
+    except Exception as e:
+        print(f"[ta.state] rate_notified error: {e}")
+        return True
+
+
+# ── History ───────────────────────────────────────────────────────────────
+def get_history(group_key: str, limit: int = 20) -> list[dict]:
+    raw = _safe(lambda: redis.lrange(_k_history(group_key), -limit, -1), default=[]) or []
+    out: list[dict] = []
+    for item in raw:
+        try:
+            out.append(json.loads(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def append_history(group_key: str, role: str, content: str, limit: int = 20) -> None:
+    payload = json.dumps({"role": role, "content": content, "ts": int(time.time())})
+    if redis is None:
+        return
+    try:
+        key = _k_history(group_key)
+        redis.rpush(key, payload)
+        redis.ltrim(key, -limit, -1)
+        redis.expire(key, HISTORY_TTL)
+    except Exception as e:
+        print(f"[ta.state] append_history error: {e}")
+
+
+def clear_history(group_key: str) -> None:
+    _safe(lambda: redis.delete(_k_history(group_key)))
+
+
+# ── Stats + scores ────────────────────────────────────────────────────────
+def bump_message_count(group_key: str, user_id: int | str, username: str | None, first_name: str | None) -> None:
+    if redis is None:
+        return
+    try:
+        key = _k_stats(group_key)
+        existing_raw = redis.hget(key, str(user_id))
+        base = {}
+        if existing_raw:
+            try:
+                base = json.loads(existing_raw)
+            except (TypeError, ValueError):
+                base = {}
+        base["username"]     = username or base.get("username")
+        base["firstName"]    = first_name or base.get("firstName")
+        base["messageCount"] = int(base.get("messageCount", 0)) + 1
+        base["lastActive"]   = int(time.time())
+        redis.hset(key, values={str(user_id): json.dumps(base)})
+    except Exception as e:
+        print(f"[ta.state] bump_message_count error: {e}")
+
+
+def get_group_stats(group_key: str) -> dict[str, dict]:
+    raw = _safe(lambda: redis.hgetall(_k_stats(group_key)), default={}) or {}
+    out: dict[str, dict] = {}
+    for uid, payload in (raw.items() if isinstance(raw, dict) else []):
+        try:
+            out[uid] = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def record_quiz_score(group_key: str, user_id: int | str, username: str | None,
+                      first_name: str | None, correct: bool) -> None:
+    if redis is None:
+        return
+    try:
+        key = _k_scores(group_key)
+        raw = redis.hget(key, str(user_id))
+        base = {}
+        if raw:
+            try:
+                base = json.loads(raw)
+            except (TypeError, ValueError):
+                base = {}
+        base["username"]  = username or base.get("username")
+        base["firstName"] = first_name or base.get("firstName")
+        base["correct"]   = int(base.get("correct", 0)) + (1 if correct else 0)
+        base["total"]     = int(base.get("total", 0)) + 1
+        redis.hset(key, values={str(user_id): json.dumps(base)})
+    except Exception as e:
+        print(f"[ta.state] record_quiz_score error: {e}")
+
+
+def get_quiz_scores(group_key: str) -> dict[str, dict]:
+    raw = _safe(lambda: redis.hgetall(_k_scores(group_key)), default={}) or {}
+    out: dict[str, dict] = {}
+    for uid, payload in (raw.items() if isinstance(raw, dict) else []):
+        try:
+            out[uid] = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def bump_total_quizzes(group_key: str) -> int:
+    return int(_safe(lambda: redis.incr(_k_total_quizzes(group_key)), default=0) or 0)
+
+
+def get_total_quizzes(group_key: str) -> int:
+    val = _safe(lambda: redis.get(_k_total_quizzes(group_key)), default=0)
+    try:
+        return int(val or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def reset_group_stats(group_key: str) -> None:
+    """Wipe stats/scores/history/totalQuizzes/quizHistory for a group."""
+    if redis is None:
+        return
+    try:
+        redis.delete(_k_stats(group_key))
+        redis.delete(_k_scores(group_key))
+        redis.delete(_k_total_quizzes(group_key))
+        redis.delete(_k_quiz_history(group_key))
+        redis.delete(_k_history(group_key))
+    except Exception as e:
+        print(f"[ta.state] reset_group_stats error: {e}")
+
+
+# ── Quiz history (for de-duplication in generation) ───────────────────────
+def get_quiz_history(group_key: str) -> list[str]:
+    raw = _safe(lambda: redis.lrange(_k_quiz_history(group_key), 0, -1), default=[]) or []
+    return list(raw) if raw else []
+
+
+def push_quiz_history(group_key: str, question_line: str) -> None:
+    if redis is None:
+        return
+    try:
+        key = _k_quiz_history(group_key)
+        redis.rpush(key, question_line)
+        redis.ltrim(key, -QUIZ_HISTORY_CAP, -1)
+    except Exception as e:
+        print(f"[ta.state] push_quiz_history error: {e}")
+
+
+# ── Active quiz per chat ──────────────────────────────────────────────────
+def set_active_quiz(chat_id: int | str, data: dict) -> None:
+    _safe(lambda: redis.set(_k_active_quiz(chat_id), json.dumps(data)))
+
+
+def get_active_quiz(chat_id: int | str) -> dict | None:
+    raw = _safe(lambda: redis.get(_k_active_quiz(chat_id)), default=None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def clear_active_quiz(chat_id: int | str) -> None:
+    _safe(lambda: redis.delete(_k_active_quiz(chat_id)))
+
+
+def list_active_quizzes() -> list[dict]:
+    """Scan would be ideal but Upstash REST does not expose SCAN in the
+    python client uniformly. Callers use the cron path only to reveal
+    quizzes they already know about via groups."""
+    quizzes: list[dict] = []
+    for g in list_groups():
+        q = get_active_quiz(g["chatId"])
+        if q:
+            q.setdefault("chatId", g["chatId"])
+            quizzes.append(q)
+    return quizzes
+
+
+# ── Announcements (pending two-step flow) ─────────────────────────────────
+PENDING_ANNOUNCEMENT_TTL = 3600
+
+
+def set_pending_announcement(admin_id: int | str, text: str, group_chat_id: int | str) -> None:
+    payload = json.dumps({"text": text, "groupChatId": str(group_chat_id)})
+    if redis is None:
+        return
+    try:
+        redis.set(_k_pending_announcement(admin_id), payload, ex=PENDING_ANNOUNCEMENT_TTL)
+    except Exception as e:
+        print(f"[ta.state] set_pending_announcement error: {e}")
+
+
+def get_pending_announcement(admin_id: int | str) -> dict | None:
+    raw = _safe(lambda: redis.get(_k_pending_announcement(admin_id)), default=None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def clear_pending_announcement(admin_id: int | str) -> None:
+    _safe(lambda: redis.delete(_k_pending_announcement(admin_id)))
+
+
+# ── Docs index ────────────────────────────────────────────────────────────
+def list_docs() -> list[dict]:
+    raw = _safe(lambda: redis.lrange(K_DOCS, 0, -1), default=[]) or []
+    out: list[dict] = []
+    for item in raw:
+        try:
+            out.append(json.loads(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def add_doc(meta: dict) -> None:
+    _safe(lambda: redis.rpush(K_DOCS, json.dumps(meta)))
+
+
+def remove_doc(slug: str) -> None:
+    """Remove doc entries by slug. Uses list-read-rewrite since lrem on
+    JSON payloads is brittle."""
+    if redis is None:
+        return
+    try:
+        current = list_docs()
+        kept = [d for d in current if d.get("slug") != slug]
+        redis.delete(K_DOCS)
+        for d in kept:
+            redis.rpush(K_DOCS, json.dumps(d))
+    except Exception as e:
+        print(f"[ta.state] remove_doc error: {e}")
+
+
+# ── Group key resolution ──────────────────────────────────────────────────
+def resolve_group_key(chat_type: str, chat_id: int | str) -> str:
+    """Return the Redis bucket key for a message.
+
+    - In a group: use that chat id.
+    - In a DM: use the instructor's currently active group, or "default".
+    """
+    if chat_type in ("group", "supergroup", "channel"):
+        return str(chat_id)
+    return get_active_group_id() or "default"
+
+
+def thread_slug(chat_type: str, chat_id: int | str, user_id: int | str | None = None) -> str:
+    """Human-friendly slug used for history keys and backups."""
+    if chat_type in ("group", "supergroup", "channel"):
+        return f"tg-group-{str(chat_id).lstrip('-')}"
+    return f"tg-dm-{user_id if user_id is not None else chat_id}"
