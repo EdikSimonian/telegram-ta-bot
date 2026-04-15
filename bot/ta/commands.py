@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+from bot.clients import bot as _bot
 from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS
 from bot.ta import docs as docs_mod
 from bot.ta import quiz as quiz_mod
+from bot.ta import stats as stats_mod
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     add_admin,
@@ -17,14 +19,18 @@ from bot.ta.state import (
     clear_history,
     get_active_group_id,
     get_active_model,
+    get_group_stats,
+    get_quiz_scores,
+    get_total_quizzes,
     get_user_chat,
     list_admins,
     list_groups,
     remove_admin,
+    reset_group_stats,
     set_active_group_id,
     set_active_model,
 )
-from bot.ta.tg import send_message
+from bot.ta.tg import delete_message, send_message
 
 
 _Handler = Callable[[Prepared], None]
@@ -81,9 +87,14 @@ def _cmd_help(p: Prepared) -> None:
         "/doc delete &lt;title&gt; — remove a doc",
         "/quiz [topic] — post a multiple-choice question",
         "/reveal — end active quiz early",
+        "/stats — message counts + quiz scores",
+        "/stats reset — clear this context's stats",
+        "/grade — engagement score per student",
+        "/grade @user — single student breakdown",
+        "/purge — bulk delete group messages + reset state",
         "",
         "<b>Coming later</b>",
-        "/stats, /grade, /announce, /purge",
+        "/announce",
         "",
         f"<b>Valid models</b>: {', '.join(VALID_MODELS)}",
     ]
@@ -285,6 +296,144 @@ def _cmd_reveal(p: Prepared) -> None:
         return
     if not quiz_mod.reveal_now(target_chat):
         send_message(p.user_id, "No active quiz to reveal in that chat.")
+
+
+# ── /stats [reset] ────────────────────────────────────────────────────────
+@_register("stats")
+def _cmd_stats(p: Prepared) -> None:
+    sub = (p.command_args or "").strip().lower()
+    if sub == "reset":
+        reset_group_stats(p.group_key)
+        send_message(p.user_id, f"✅ Cleared stats for <code>{p.group_key}</code>.", parse_mode="HTML")
+        return
+
+    stats_map  = get_group_stats(p.group_key)
+    scores_map = get_quiz_scores(p.group_key)
+    total_q    = get_total_quizzes(p.group_key)
+
+    if not stats_map and not scores_map:
+        send_message(p.user_id, "No stats yet for this context.")
+        return
+
+    # Message activity (sorted by messageCount desc).
+    lines = [f"<b>Stats</b> — <code>{p.group_key}</code> (quizzes posted: {total_q})"]
+    lines.append("")
+    lines.append("<b>Messages</b>")
+    by_msgs = sorted(
+        stats_map.items(),
+        key=lambda kv: int(kv[1].get("messageCount", 0)),
+        reverse=True,
+    )[:15]
+    for _uid, data in by_msgs:
+        name = data.get("firstName") or data.get("username") or "(unknown)"
+        lines.append(f"• {name} — {int(data.get('messageCount', 0))}")
+
+    # Quiz scores (sorted by accuracy desc).
+    if scores_map:
+        lines.append("")
+        lines.append("<b>Quiz scores</b>")
+        def _accuracy(kv):
+            data = kv[1]
+            t = int(data.get("total", 0))
+            return (int(data.get("correct", 0)) / t) if t else 0.0
+        by_acc = sorted(scores_map.items(), key=_accuracy, reverse=True)[:15]
+        for _uid, data in by_acc:
+            name = data.get("firstName") or data.get("username") or "(unknown)"
+            c, t = int(data.get("correct", 0)), int(data.get("total", 0))
+            pct = 100 * c / t if t else 0
+            lines.append(f"• {name} — {c}/{t} ({pct:.0f}%)")
+
+    send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+
+
+# ── /grade [@user] ────────────────────────────────────────────────────────
+@_register("grade")
+def _cmd_grade(p: Prepared) -> None:
+    target_username = _first_username(p.command_args)
+    stats_map  = get_group_stats(p.group_key)
+    scores_map = get_quiz_scores(p.group_key)
+    total_q    = get_total_quizzes(p.group_key)
+    engagement = stats_mod.compute_all(stats_map, scores_map, total_q)
+
+    if target_username:
+        match = next(
+            (e for e in engagement if (e.username or "").lower() == target_username),
+            None,
+        )
+        if match is None:
+            send_message(p.user_id, f"No data for @{target_username} in <code>{p.group_key}</code>.",
+                         parse_mode="HTML")
+            return
+        send_message(p.user_id, _render_grade_detail(match), parse_mode="HTML")
+        return
+
+    if not engagement:
+        send_message(p.user_id, "No data yet for this context.")
+        return
+
+    engagement.sort(key=lambda e: e.total_pts, reverse=True)
+    lines = [f"<b>Engagement</b> — <code>{p.group_key}</code> (quizzes posted: {total_q})", ""]
+    for e in engagement[:25]:
+        flag = " ⚠️" if e.inactive else ""
+        lines.append(
+            f"• {e.display_name}{flag} — <b>{e.total_pts:.0f}/100</b>  "
+            f"(msgs {e.messages_pts:.0f} / part {e.particip_pts:.0f} / acc {e.accuracy_pts:.0f})"
+        )
+    send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+
+
+def _render_grade_detail(e: "stats_mod.Engagement") -> str:
+    flag = " ⚠️ (inactive >7d)" if e.inactive else ""
+    return (
+        f"<b>{e.display_name}</b>{flag}\n"
+        f"Total: <b>{e.total_pts:.0f}/100</b>\n"
+        f"  • Messages: {e.messages} → {e.messages_pts:.0f}/{stats_mod.W_MESSAGES}\n"
+        f"  • Participation: {e.attempts}/{e.total_quizzes} "
+        f"({e.participation_pct:.0f}%) → {e.particip_pts:.0f}/{stats_mod.W_PARTICIPATION}\n"
+        f"  • Accuracy: {e.correct}/{e.attempts} "
+        f"({e.accuracy_pct:.0f}%) → {e.accuracy_pts:.0f}/{stats_mod.W_ACCURACY}"
+    )
+
+
+# ── /purge ────────────────────────────────────────────────────────────────
+@_register("purge")
+def _cmd_purge(p: Prepared) -> None:
+    """Delete all group messages from id 2 up to current, then reset state."""
+    target_chat = p.chat_id if not p.is_dm else get_active_group_id()
+    if not target_chat:
+        send_message(p.user_id, "No active group to purge.")
+        return
+    current_id = getattr(p.message, "message_id", None) or 0
+    if current_id <= 2:
+        send_message(p.user_id, "Nothing to purge (current message id ≤ 2).")
+        return
+
+    purged = 0
+    migrated_to: str | None = None
+    for mid in range(2, current_id + 1):
+        try:
+            _bot.delete_message(target_chat, mid)
+            purged += 1
+        except Exception as e:
+            err = str(e)
+            # Supergroup migration: the chat id changes sign, so retry with the new one.
+            if "migrate_to_chat_id" in err and migrated_to is None:
+                # Extract new chat id — telebot surfaces it inside the
+                # Telegram error. Format: migrate_to_chat_id=-100...
+                import re as _re
+                m = _re.search(r"migrate_to_chat_id[^0-9\-]*(-?\d+)", err)
+                if m:
+                    migrated_to = m.group(1)
+                    target_chat = migrated_to
+            # Most errors are "message can't be deleted" (>48h old) — ignore.
+
+    reset_group_stats(p.group_key)
+    extra = f" Chat migrated to <code>{migrated_to}</code>." if migrated_to else ""
+    send_message(
+        p.user_id,
+        f"✅ Purged {purged} messages and cleared state for <code>{p.group_key}</code>.{extra}",
+        parse_mode="HTML",
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
