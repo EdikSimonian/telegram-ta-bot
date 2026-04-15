@@ -38,7 +38,15 @@ deploy:
 		echo "Find them in Vercel dashboard → Project → Settings → General."; \
 		exit 1; \
 	fi; \
-	VERCEL_ORG_ID="$$VERCEL_ORG_ID" VERCEL_PROJECT_ID="$$VERCEL_PROJECT_ID" vercel --prod
+	VERCEL_ORG_ID="$$VERCEL_ORG_ID" VERCEL_PROJECT_ID="$$VERCEL_PROJECT_ID" vercel --prod; \
+	rc=$$?; \
+	if [ $$rc -eq 0 ] && [ -n "$$PROD_URL" ]; then \
+		echo ""; \
+		printf "Warming %s/api/health to trigger deploy notice ... " "$$PROD_URL"; \
+		code=$$(curl -s -o /dev/null -w "%{http_code}" "$$PROD_URL/api/health" || echo "000"); \
+		echo "$$code"; \
+	fi; \
+	exit $$rc
 
 deploy-prod:
 	$(MAKE) deploy ENV_FILE=.env.prod
