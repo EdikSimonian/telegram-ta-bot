@@ -51,6 +51,15 @@ QSTASH_TOKEN               = os.environ.get("QSTASH_TOKEN", "").strip()
 QSTASH_CURRENT_SIGNING_KEY = os.environ.get("QSTASH_CURRENT_SIGNING_KEY", "").strip()
 QSTASH_NEXT_SIGNING_KEY    = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "").strip()
 
+# ── GitHub ────────────────────────────────────────────────────────────────
+# Optional PAT for private repos or to avoid 60-req/hour unauthenticated
+# rate limit. Public repos work without it for typical course volume.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+# Shared secret configured on every GitHub webhook that posts to us. The
+# webhook endpoint verifies X-Hub-Signature-256 against this — unsigned
+# requests get 401.
+GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
+
 # ── Vercel Blob ───────────────────────────────────────────────────────────
 BLOB_READ_WRITE_TOKEN = os.environ.get("BLOB_READ_WRITE_TOKEN", "").strip()
 # Prefix every blob path. Lets one shared Blob store back multiple bots

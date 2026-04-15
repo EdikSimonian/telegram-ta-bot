@@ -33,6 +33,7 @@ K_GROUP_WELCOMED   = f"{_P}groupWelcomed"
 K_DM_WELCOMED      = f"{_P}dmWelcomed"
 K_KNOWN_THREADS    = f"{_P}knownThreads"
 K_DOCS             = f"{_P}docs"
+K_GIT_REPOS        = f"{_P}gitrepos"
 
 QUIZ_HISTORY_CAP = 20
 
@@ -477,6 +478,68 @@ def remove_doc(slug: str) -> None:
             redis.rpush(K_DOCS, json.dumps(d))
     except Exception as e:
         print(f"[ta.state] remove_doc error: {e}")
+
+
+# ── Git repos (for RAG auto-sync) ─────────────────────────────────────────
+def list_git_repos() -> list[dict]:
+    raw = _safe(lambda: redis.lrange(K_GIT_REPOS, 0, -1), default=[]) or []
+    out: list[dict] = []
+    for item in raw:
+        try:
+            out.append(json.loads(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def get_git_repo(owner: str, repo: str) -> dict | None:
+    for r in list_git_repos():
+        if r.get("owner", "").lower() == owner.lower() and r.get("repo", "").lower() == repo.lower():
+            return r
+    return None
+
+
+def add_git_repo(meta: dict) -> None:
+    """Idempotent insert keyed on owner+repo."""
+    if redis is None:
+        return
+    try:
+        existing = list_git_repos()
+        owner, repo = meta.get("owner", ""), meta.get("repo", "")
+        kept = [
+            r for r in existing
+            if not (r.get("owner", "").lower() == owner.lower()
+                    and r.get("repo", "").lower() == repo.lower())
+        ]
+        kept.append(meta)
+        redis.delete(K_GIT_REPOS)
+        for r in kept:
+            redis.rpush(K_GIT_REPOS, json.dumps(r))
+    except Exception as e:
+        print(f"[ta.state] add_git_repo error: {e}")
+
+
+def remove_git_repo(owner: str, repo: str) -> dict | None:
+    """Remove by owner+repo; returns the removed entry or None."""
+    if redis is None:
+        return None
+    try:
+        existing = list_git_repos()
+        removed = None
+        kept = []
+        for r in existing:
+            if (r.get("owner", "").lower() == owner.lower()
+                    and r.get("repo", "").lower() == repo.lower()):
+                removed = r
+            else:
+                kept.append(r)
+        redis.delete(K_GIT_REPOS)
+        for r in kept:
+            redis.rpush(K_GIT_REPOS, json.dumps(r))
+        return removed
+    except Exception as e:
+        print(f"[ta.state] remove_git_repo error: {e}")
+        return None
 
 
 # ── Group key resolution ──────────────────────────────────────────────────

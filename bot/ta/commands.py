@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from typing import Callable
 
+from bot import github as gh
 from bot.clients import bot as _bot
 from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS
 from bot.ta import announcements as ann_mod
 from bot.ta import docs as docs_mod
+from bot.ta import git_ingest as git_mod
 from bot.ta import quiz as quiz_mod
 from bot.ta import stats as stats_mod
 from bot.ta.prepare import Prepared
@@ -399,6 +401,91 @@ def _render_grade_detail(e: "stats_mod.Engagement") -> str:
 @_register("announce")
 def _cmd_announce(p: Prepared) -> None:
     ann_mod.start(p)
+
+
+# ── /git list|add|remove|sync ─────────────────────────────────────────────
+@_register("git")
+def _cmd_git(p: Prepared) -> None:
+    from bot.ta.state import list_git_repos
+    tokens = (p.command_args or "").split()
+    sub = tokens[0].lower() if tokens else ""
+    arg = tokens[1] if len(tokens) > 1 else ""
+
+    if not sub or sub == "list":
+        repos = list_git_repos()
+        if not repos:
+            send_message(p.user_id, "No GitHub repos indexed. Use /git add <url>.")
+            return
+        lines = ["<b>Indexed GitHub repos</b>"]
+        for r in repos:
+            last = r.get("lastSync", 0)
+            lines.append(
+                f"• <code>{r.get('owner')}/{r.get('repo')}</code> @ "
+                f"<code>{r.get('branch', '?')}</code> — by @{r.get('addedBy') or '?'}"
+            )
+        send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if sub == "add":
+        parsed = gh.parse_repo_url(arg)
+        if not parsed:
+            send_message(p.user_id, "Usage: /git add <owner/repo> or a GitHub URL")
+            return
+        owner, repo, branch = parsed
+        send_message(p.user_id, f"⏳ Ingesting <code>{owner}/{repo}</code>… "
+                                "this can take a minute.", parse_mode="HTML")
+        result = git_mod.sync_repo(owner, repo, branch, added_by=p.username)
+        if not result.get("ok"):
+            send_message(p.user_id, f"❌ Failed: {result.get('reason', 'unknown')}")
+            return
+        send_message(
+            p.user_id,
+            f"✅ <b>{owner}/{repo}</b> @ <code>{result['branch']}</code>\n"
+            f"files added: {result['files_added']}\n"
+            f"files skipped: {result['files_skipped']}\n\n"
+            f"Set up a webhook at:\n"
+            f"  <code>https://github.com/{owner}/{repo}/settings/hooks/new</code>\n"
+            "Payload URL: &lt;PROD_URL&gt;/api/github\n"
+            "Content type: application/json\n"
+            "Secret: the GITHUB_WEBHOOK_SECRET env var in this project\n"
+            "Events: Just the push event",
+            parse_mode="HTML",
+        )
+        return
+
+    if sub == "remove":
+        parsed = gh.parse_repo_url(arg)
+        if not parsed:
+            send_message(p.user_id, "Usage: /git remove <owner/repo>")
+            return
+        owner, repo, _branch = parsed
+        count = git_mod.remove_all(owner, repo)
+        if count == 0:
+            send_message(p.user_id, f"No indexed files for {owner}/{repo}.")
+        else:
+            send_message(p.user_id, f"✅ Removed {count} files for {owner}/{repo}.")
+        return
+
+    if sub == "sync":
+        parsed = gh.parse_repo_url(arg)
+        if not parsed:
+            send_message(p.user_id, "Usage: /git sync <owner/repo>")
+            return
+        owner, repo, branch = parsed
+        send_message(p.user_id, f"⏳ Re-ingesting <code>{owner}/{repo}</code>…",
+                     parse_mode="HTML")
+        result = git_mod.sync_repo(owner, repo, branch, added_by=p.username)
+        if not result.get("ok"):
+            send_message(p.user_id, f"❌ Failed: {result.get('reason', 'unknown')}")
+            return
+        send_message(
+            p.user_id,
+            f"✅ Synced {owner}/{repo} — added {result['files_added']}, "
+            f"skipped {result['files_skipped']}",
+        )
+        return
+
+    send_message(p.user_id, "Usage: /git list | add <repo> | remove <repo> | sync <repo>")
 
 
 # ── /purge ────────────────────────────────────────────────────────────────
