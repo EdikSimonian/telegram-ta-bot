@@ -124,22 +124,31 @@ def route(message) -> None:
     _answer_question(p)
 
 
-def _answer_question(p: Prepared) -> None:
-    """Stage 2 bridge: delegate to the existing ``ask_ai`` for now.
+_STUDENT_GROUP_WAIT_SECONDS = 3
 
-    Stage 5 replaces this with a RAG-grounded version that uses the
-    group-level history key and respects the prompt prefix rules.
+
+def _answer_question(p: Prepared) -> None:
+    """Run the RAG + LLM pipeline and send the reply.
+
+    In groups without a direct mention we pause briefly (§5.4) so a real
+    student can jump in first — skipping the wait for DMs, mentions, and
+    replies to the bot.
     """
-    from bot.ai import ask_ai
+    from bot.ai import answer
     from bot.helpers import keep_typing, send_reply
 
-    text = p.stripped_text or ""
-    if not text:
-        return
+    if (
+        not p.is_dm
+        and not p.is_mention
+        and not p.is_reply_to_bot
+        and not p.is_admin
+    ):
+        import time
+        time.sleep(_STUDENT_GROUP_WAIT_SECONDS)
 
     try:
         with keep_typing(p.chat_id):
-            reply = ask_ai(p.user_id, text)
+            reply = answer(p)
         if reply:
             send_reply(p.message, reply)
     except Exception as e:

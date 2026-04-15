@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Callable
 
 from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS
+from bot.ta import docs as docs_mod
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     add_admin,
@@ -73,9 +74,13 @@ def _cmd_help(p: Prepared) -> None:
         "/model — show current model",
         "/model &lt;name&gt; — switch chat model",
         "/reset — clear history + default model for active group",
+        "/doc — list docs",
+        "/doc add &lt;title&gt;\\n&lt;content&gt; — index a doc",
+        "/doc update &lt;title&gt;\\n&lt;content&gt; — replace a doc",
+        "/doc delete &lt;title&gt; — remove a doc",
         "",
         "<b>Coming later</b>",
-        "/doc, /quiz, /reveal, /stats, /grade, /announce, /purge",
+        "/quiz, /reveal, /stats, /grade, /announce, /purge",
         "",
         f"<b>Valid models</b>: {', '.join(VALID_MODELS)}",
     ]
@@ -247,6 +252,12 @@ def _cmd_group(p: Prepared) -> None:
         return
     set_active_group_id(target)
     send_message(p.user_id, f"✅ Active group switched to <code>{target}</code>.", parse_mode="HTML")
+
+
+# ── /doc list|add|update|delete ───────────────────────────────────────────
+@_register("doc")
+def _cmd_doc(p: Prepared) -> None:
+    docs_mod.dispatch(p)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

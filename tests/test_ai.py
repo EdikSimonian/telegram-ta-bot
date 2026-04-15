@@ -1,104 +1,149 @@
-from unittest.mock import patch, MagicMock
-from bot.ai import needs_search
+"""bot/ai.answer() — RAG + group history + model override + prefix."""
+from unittest.mock import MagicMock, patch
 
 
-# ── needs_search ───────────────────────────────────────────────────────────────
-
-def test_needs_search_detects_news():
-    assert needs_search("what is the latest news about Iran?") is True
-
-
-def test_needs_search_detects_today():
-    assert needs_search("what happened today?") is True
-
-
-def test_needs_search_detects_current():
-    assert needs_search("who is the current president?") is True
-
-
-def test_needs_search_false_for_general_question():
-    assert needs_search("what is the capital of France?") is False
+def _prepared(*, stripped_text="what is python", group_key="-100123",
+              is_dm=False, is_mention=False):
+    p = MagicMock()
+    p.stripped_text = stripped_text
+    p.group_key = group_key
+    p.user_id = 42
+    p.username = "student"
+    p.is_dm = is_dm
+    p.is_mention = is_mention
+    p.is_reply_to_bot = False
+    p.is_instructor = False
+    p.mentions_other_user = False
+    p.reply_to_username = None
+    return p
 
 
-def test_needs_search_false_for_coding_question():
-    assert needs_search("how do I reverse a list in Python?") is False
+def _mock_ai_response(text="42 is the answer"):
+    resp = MagicMock()
+    resp.choices = [MagicMock(message=MagicMock(content=text))]
+    return resp
 
 
-def test_needs_search_case_insensitive():
-    assert needs_search("What is TODAY's weather?") is True
+def test_answer_returns_none_on_empty_input():
+    from bot.ai import answer
+    p = _prepared(stripped_text="")
+    assert answer(p) is None
 
 
-# ── ask_ai orchestration ──────────────────────────────────────────────────────
-
-def test_ask_ai_returns_reply():
-    with patch("bot.ai.generate", return_value="Hello there!"), \
+def test_answer_no_rag_hits_calls_model_without_context():
+    with patch("bot.ai.rag.retrieve", return_value=[]), \
          patch("bot.ai.get_history", return_value=[]), \
-         patch("bot.ai.save_history"), \
-         patch("bot.ai.get_provider", return_value="main"):
-        from bot.ai import ask_ai
-        reply = ask_ai(123, "hi")
-        assert reply == "Hello there!"
+         patch("bot.ai.append_history") as ah, \
+         patch("bot.ai.get_active_model", return_value=None), \
+         patch("bot.ai.ai") as client:
+        client.chat.completions.create.return_value = _mock_ai_response("hello")
+        from bot.ai import answer
+        out = answer(_prepared())
+        assert out == "hello"
+        system_msg = client.chat.completions.create.call_args.kwargs["messages"][0]
+        assert system_msg["role"] == "system"
+        assert "Course context" not in system_msg["content"]
+        assert ah.call_count == 2  # user + assistant saved
 
 
-def test_ask_ai_saves_history():
-    with patch("bot.ai.generate", return_value="reply"), \
+def test_answer_with_rag_hits_injects_context_and_citations():
+    matches = [
+        {"title": "CS101", "chunkText": "Python is a language.", "blobUrl": "https://b/a", "score": 0.9},
+        {"title": "CS101", "chunkText": "More on Python.",        "blobUrl": "https://b/a", "score": 0.8},
+        {"title": "NumPy", "chunkText": "Arrays are fast.",       "blobUrl": "https://b/b", "score": 0.7},
+    ]
+    with patch("bot.ai.rag.retrieve", return_value=matches), \
+         patch("bot.ai.rag.format_context", return_value="<ctx>"), \
          patch("bot.ai.get_history", return_value=[]), \
-         patch("bot.ai.save_history") as mock_save, \
-         patch("bot.ai.get_provider", return_value="main"):
-        from bot.ai import ask_ai
-        ask_ai(123, "hi")
-        mock_save.assert_called_once()
-        saved_history = mock_save.call_args[0][1]
-        assert saved_history[0] == {"role": "user", "content": "hi"}
-        assert saved_history[1]["role"] == "assistant"
+         patch("bot.ai.append_history"), \
+         patch("bot.ai.get_active_model", return_value=None), \
+         patch("bot.ai.ai") as client:
+        client.chat.completions.create.return_value = _mock_ai_response("because of arrays")
+        from bot.ai import answer
+        out = answer(_prepared())
+        assert out is not None
+        assert "Sources:" in out
+        # Dedup: two hits for CS101 (same blobUrl) collapse to one citation
+        assert out.count("https://b/a") == 1
+        assert "https://b/b" in out
+        system_msg = client.chat.completions.create.call_args.kwargs["messages"][0]
+        assert "<ctx>" in system_msg["content"]
 
 
-def test_ask_ai_appends_sources_when_search_used():
-    sources = [{"title": "BBC", "url": "https://bbc.com"}]
-    with patch("bot.ai.generate", return_value="Here is the news."), \
+def test_answer_uses_group_active_model_when_set():
+    with patch("bot.ai.rag.retrieve", return_value=[]), \
          patch("bot.ai.get_history", return_value=[]), \
-         patch("bot.ai.save_history"), \
-         patch("bot.ai.get_provider", return_value="main"), \
-         patch("bot.ai.TAVILY_API_KEY", "fake_key"), \
-         patch("bot.ai.needs_search", return_value=True), \
-         patch("bot.search.web_search", return_value=("search text", sources)):
-        from bot.ai import ask_ai
-        reply = ask_ai(123, "latest news")
-        assert "**Sources:**" in reply
-        assert "[BBC](https://bbc.com)" in reply
+         patch("bot.ai.append_history"), \
+         patch("bot.ai.get_active_model", return_value="gpt-5.4-mini"), \
+         patch("bot.ai.ai") as client:
+        client.chat.completions.create.return_value = _mock_ai_response("ok")
+        from bot.ai import answer
+        answer(_prepared())
+        assert client.chat.completions.create.call_args.kwargs["model"] == "gpt-5.4-mini"
 
 
-def test_ask_ai_no_sources_for_general_question():
-    with patch("bot.ai.generate", return_value="Paris."), \
+def test_answer_falls_back_to_default_model():
+    with patch("bot.ai.rag.retrieve", return_value=[]), \
          patch("bot.ai.get_history", return_value=[]), \
-         patch("bot.ai.save_history"), \
-         patch("bot.ai.get_provider", return_value="main"):
-        from bot.ai import ask_ai
-        reply = ask_ai(123, "what is the capital of France?")
-        assert "Sources" not in reply
+         patch("bot.ai.append_history"), \
+         patch("bot.ai.get_active_model", return_value=None), \
+         patch("bot.ai.ai") as client:
+        client.chat.completions.create.return_value = _mock_ai_response("ok")
+        from bot.ai import answer
+        answer(_prepared())
+        assert client.chat.completions.create.call_args.kwargs["model"] == "gpt-5.4-nano"
 
 
-def test_ask_ai_skips_search_for_hf_provider():
-    """HF (ArmGPT) is Armenian-only; don't pollute it with English search results."""
-    sources = [{"title": "BBC", "url": "https://bbc.com"}]
-    with patch("bot.ai.generate", return_value="Հայաստան"), \
+def test_answer_loads_group_history_not_user_history():
+    history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+    ]
+    with patch("bot.ai.rag.retrieve", return_value=[]), \
+         patch("bot.ai.get_history", return_value=history) as gh, \
+         patch("bot.ai.append_history"), \
+         patch("bot.ai.get_active_model", return_value=None), \
+         patch("bot.ai.ai") as client:
+        client.chat.completions.create.return_value = _mock_ai_response("ok")
+        from bot.ai import answer
+        answer(_prepared(group_key="-100999"))
+        gh.assert_called_with("-100999", limit=20)
+        msgs = client.chat.completions.create.call_args.kwargs["messages"]
+        # history goes between system and the new user message
+        assert msgs[-1]["role"] == "user"
+        assert msgs[-2]["role"] == "assistant"
+        assert msgs[-2]["content"] == "reply"
+
+
+def test_answer_applies_prompt_prefix_for_instructor():
+    with patch("bot.ai.rag.retrieve", return_value=[]), \
          patch("bot.ai.get_history", return_value=[]), \
-         patch("bot.ai.save_history"), \
-         patch("bot.ai.get_provider", return_value="hf"), \
-         patch("bot.ai.TAVILY_API_KEY", "fake_key"), \
-         patch("bot.ai.needs_search", return_value=True), \
-         patch("bot.search.web_search", return_value=("search text", sources)) as mock_search:
-        from bot.ai import ask_ai
-        reply = ask_ai(123, "latest news")
-        mock_search.assert_not_called()
-        assert "Sources" not in reply
+         patch("bot.ai.append_history"), \
+         patch("bot.ai.get_active_model", return_value=None), \
+         patch("bot.ai.ai") as client, \
+         patch("bot.ai.prompt_prefix", return_value="[INSTRUCTOR @ediksimonian]:"):
+        client.chat.completions.create.return_value = _mock_ai_response("ok")
+        from bot.ai import answer
+        answer(_prepared(stripped_text="help"))
+        last = client.chat.completions.create.call_args.kwargs["messages"][-1]
+        assert last["role"] == "user"
+        assert last["content"].startswith("[INSTRUCTOR @ediksimonian]:")
 
 
-def test_ask_ai_passes_user_id_to_generate():
-    with patch("bot.ai.generate", return_value="hi") as mock_gen, \
+def test_answer_returns_none_on_api_error():
+    with patch("bot.ai.rag.retrieve", return_value=[]), \
          patch("bot.ai.get_history", return_value=[]), \
-         patch("bot.ai.save_history"), \
-         patch("bot.ai.get_provider", return_value="main"):
-        from bot.ai import ask_ai
-        ask_ai(456, "hello")
-        assert mock_gen.call_args[0][0] == 456
+         patch("bot.ai.append_history") as ah, \
+         patch("bot.ai.get_active_model", return_value=None), \
+         patch("bot.ai.ai") as client:
+        client.chat.completions.create.side_effect = Exception("boom")
+        from bot.ai import answer
+        assert answer(_prepared()) is None
+        ah.assert_not_called()  # don't persist when we have no reply
+
+
+# ── needs_search ──────────────────────────────────────────────────────────
+def test_needs_search_trigger_words():
+    from bot.ai import needs_search
+    assert needs_search("what's the latest news today") is True
+    assert needs_search("explain recursion") is False
