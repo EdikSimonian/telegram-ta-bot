@@ -73,6 +73,10 @@ def _k_pending_announcement(admin_id: int | str) -> str:
     return f"{_P}pendingAnnouncement:{admin_id}"
 
 
+def _k_active_model(group_key: str) -> str:
+    return f"{_P}activeModel:{group_key}"
+
+
 def _safe(op, default=None):
     """Run a Redis op; log and return ``default`` on failure."""
     if redis is None:
@@ -400,6 +404,20 @@ def list_active_quizzes() -> list[dict]:
             q.setdefault("chatId", g["chatId"])
             quizzes.append(q)
     return quizzes
+
+
+# ── Active model per group ────────────────────────────────────────────────
+def get_active_model(group_key: str) -> str | None:
+    """Return the override model for this group, or None for the default."""
+    return _safe(lambda: redis.get(_k_active_model(group_key)), default=None)
+
+
+def set_active_model(group_key: str, model: str) -> None:
+    _safe(lambda: redis.set(_k_active_model(group_key), model))
+
+
+def clear_active_model(group_key: str) -> None:
+    _safe(lambda: redis.delete(_k_active_model(group_key)))
 
 
 # ── Announcements (pending two-step flow) ─────────────────────────────────

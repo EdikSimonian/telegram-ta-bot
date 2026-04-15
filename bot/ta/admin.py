@@ -9,7 +9,7 @@ import traceback
 
 from bot.clients import bot
 from bot.config import TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
-from bot.ta import announcements, commands, leaderboard, quiz, welcome
+from bot.ta import announcements, commands, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
     bump_message_count,
@@ -89,14 +89,6 @@ def route(message) -> None:
     # 6. Non-admin + command in a group → silent delete.
     if p.is_command and not p.is_admin and not p.is_dm:
         delete_message(p.chat_id, p.message.message_id)
-        return
-
-    # 9. /leaderboard from anyone, anywhere (checked before mention/quiz logic
-    #    because it's a universal command). Actually the spec lists it after
-    #    quiz answers — but /leaderboard is a slash command so it's already
-    #    been rejected at step 6 for non-admins in groups. Keep the DM path.
-    if p.is_command and p.command == "leaderboard":
-        leaderboard.send_leaderboard(p)
         return
 
     # 7/8. Quiz answers while a quiz is active in this chat.

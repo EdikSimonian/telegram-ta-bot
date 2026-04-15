@@ -220,19 +220,6 @@ def test_student_command_in_group_deleted_silently():
         _exit(stack)
 
 
-# ── Rule 9: /leaderboard is public ────────────────────────────────────────
-def test_leaderboard_in_dm_works_for_anyone():
-    stack = _patches()
-    _enter(stack)
-    try:
-        with patch("bot.ta.admin.leaderboard.send_leaderboard") as lb:
-            from bot.ta.admin import route
-            route(_msg(chat_type="private", chat_id=42, username="student", text="/leaderboard"))
-            lb.assert_called_once()
-    finally:
-        _exit(stack)
-
-
 # ── Rules 7/8: quiz letter answers ────────────────────────────────────────
 def test_valid_quiz_letter_records_answer_and_skips_llm():
     stack = _patches(quiz_active=True)
