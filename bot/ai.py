@@ -20,7 +20,7 @@ from bot.config import (
     SYSTEM_PROMPT,
     TAVILY_API_KEY,
 )
-from bot.ta import rag
+from bot.ta import guardrail, rag
 from bot.ta.prepare import Prepared, prompt_prefix
 from bot.ta.state import (
     append_history,
@@ -107,10 +107,15 @@ def answer(p: Prepared) -> str | None:
     model = get_active_model(p.group_key) or DEFAULT_MODEL
     try:
         resp = ai.chat.completions.create(model=model, messages=messages)
-        reply = (resp.choices[0].message.content or "").strip()
+        raw_reply = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[ai] chat error: {e}")
         return None
+
+    # 3b. Guardrail: strip <think> blocks, leading reasoning, drop hedged /
+    #     IGNORE / empty replies. Suppressed replies don't persist to history
+    #     (we don't want "IGNORE" polluting the context).
+    reply = guardrail.clean(raw_reply)
     if not reply:
         return None
 
