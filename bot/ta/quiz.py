@@ -217,7 +217,7 @@ def record_answer(p: Prepared, letter: str) -> None:
     }
     active["answers"] = answers
     set_active_quiz(p.chat_id, active)
-    set_reaction(p.chat_id, p.message.message_id, "👍")
+    set_reaction(p.chat_id, p.message.message_id, "🫡")
 
 
 def react_invalid(p: Prepared) -> None:
