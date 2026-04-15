@@ -9,6 +9,7 @@ from typing import Callable
 
 from bot.clients import bot as _bot
 from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS
+from bot.ta import announcements as ann_mod
 from bot.ta import docs as docs_mod
 from bot.ta import quiz as quiz_mod
 from bot.ta import stats as stats_mod
@@ -92,9 +93,8 @@ def _cmd_help(p: Prepared) -> None:
         "/grade — engagement score per student",
         "/grade @user — single student breakdown",
         "/purge — bulk delete group messages + reset state",
-        "",
-        "<b>Coming later</b>",
-        "/announce",
+        "/announce &lt;message&gt; — stage an announcement for the active group",
+        "  (reply <b>send it</b> to post or <b>cancel</b> to discard)",
         "",
         f"<b>Valid models</b>: {', '.join(VALID_MODELS)}",
     ]
@@ -393,6 +393,12 @@ def _render_grade_detail(e: "stats_mod.Engagement") -> str:
         f"  • Accuracy: {e.correct}/{e.attempts} "
         f"({e.accuracy_pct:.0f}%) → {e.accuracy_pts:.0f}/{stats_mod.W_ACCURACY}"
     )
+
+
+# ── /announce ─────────────────────────────────────────────────────────────
+@_register("announce")
+def _cmd_announce(p: Prepared) -> None:
+    ann_mod.start(p)
 
 
 # ── /purge ────────────────────────────────────────────────────────────────
