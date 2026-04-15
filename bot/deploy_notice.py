@@ -55,21 +55,8 @@ def notify_once() -> None:
         _DONE_THIS_PROCESS = True
         return
 
-    branch   = os.environ.get("VERCEL_GIT_COMMIT_REF", "").strip()
-    author   = os.environ.get("VERCEL_GIT_COMMIT_AUTHOR_LOGIN", "").strip()
-    msg      = os.environ.get("VERCEL_GIT_COMMIT_MESSAGE", "").strip()
-    subject  = msg.splitlines()[0] if msg else ""
-
-    lines = [f"🚀 <b>{BOT_ENV}</b> deploy live — <code>{short}</code>"]
-    if branch:
-        lines.append(f"branch: <code>{branch}</code>")
-    if author:
-        lines.append(f"author: @{author}")
-    if subject:
-        lines.append(f"\n{subject}")
-
     try:
-        bot.send_message(admin_chat, "\n".join(lines), parse_mode="HTML")
+        bot.send_message(admin_chat, f"🚀 {BOT_ENV} deploy live — {short}")
     except Exception as e:
         print(f"[deploy_notice] DM error: {e}")
     _DONE_THIS_PROCESS = True
