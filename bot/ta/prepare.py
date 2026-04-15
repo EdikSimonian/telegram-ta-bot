@@ -12,11 +12,8 @@ from typing import Any
 
 from bot.clients import BOT_INFO
 from bot.config import PERMANENT_ADMIN
-from bot.ta.state import (
-    is_admin,
-    resolve_group_key,
-    thread_slug,
-)
+from bot.ta import state as _state
+from bot.ta.state import resolve_group_key, thread_slug
 
 
 @dataclass
@@ -116,7 +113,8 @@ def prepare(message) -> Prepared:
     is_command, command, command_args = _parse_command(text, bot_username)
     stripped = _strip_mention(text, bot_username)
 
-    is_admin_flag    = is_admin(username)
+    # Look up via the module so tests patching bot.ta.state.is_admin take effect.
+    is_admin_flag    = _state.is_admin(username)
     is_instructor    = (username or "") == PERMANENT_ADMIN
 
     return Prepared(

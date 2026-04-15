@@ -1,127 +1,68 @@
+"""Telegram handler wiring.
+
+Every message and command flows through a single router in
+``bot.ta.admin``. Handlers registered here are thin: they exist only to
+satisfy pyTelegramBotAPI's decorator-based dispatch so that commands and
+free-form text both end up in the same place.
+
+``my_chat_member`` events (group join/leave) are handled separately —
+they are not ``Message`` updates, so telebot dispatches them via a
+different decorator.
+"""
+from __future__ import annotations
+
 import os
 from datetime import datetime
-from bot.clients import bot, BOT_INFO
-from bot.config import MODEL, RATE_LIMIT, HF_SPACE_ID
-from bot.ai import ask_ai
-from bot.helpers import keep_typing, send_reply, should_respond
-from bot.history import clear_history
-from bot.preferences import get_provider, set_provider
-from bot.rate_limit import is_rate_limited
 
-# Verbose console logging for local dev and teaching. Enabled by
-# BOT_VERBOSE_LOG=1 (run_local.py sets this automatically). Prints one
-# line per inbound/outbound message so kids and teachers can see the
-# conversation flow in their terminal while the bot is running.
+from bot.clients import bot, BOT_INFO
+from bot.ta import admin as ta_admin
+from bot.ta.state import register_group, unregister_group
+from bot.ta.welcome import send_group_welcome_once
+
+
 VERBOSE_LOG = os.environ.get("BOT_VERBOSE_LOG", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _log(message, direction: str, text: str) -> None:
-    """Print a one-line trace of a message in verbose mode.
-
-    direction is "in" (user → bot) or "out" (bot → user). Text is
-    truncated to 500 characters so long AI replies don't flood the
-    terminal. Newlines are collapsed for single-line readability.
-    """
+    """One-line trace for local dev. No-op in production."""
     if not VERBOSE_LOG:
         return
-    user = message.from_user
-    user_name = f"@{user.username}" if user.username else (user.first_name or f"user:{user.id}")
+    user = getattr(message, "from_user", None)
+    user_name = (
+        f"@{user.username}"
+        if user and user.username
+        else (getattr(user, "first_name", None) or f"user:{getattr(user, 'id', '?')}")
+    )
     bot_name = f"@{BOT_INFO.username}"
     snippet = (text or "").replace("\n", " ").replace("\r", " ")
     if len(snippet) > 500:
         snippet = snippet[:500] + "..."
-    if direction == "in":
-        sender, receiver = user_name, bot_name
-    else:
-        sender, receiver = bot_name, user_name
+    sender, receiver = (user_name, bot_name) if direction == "in" else (bot_name, user_name)
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {sender} → {receiver}: {snippet}", flush=True)
 
 
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    bot.send_message(message.chat.id, "Hello! I'm your AI assistant. Send me a message to get started.\n\nUse /help to see available commands.")
+# ── Single catch-all: both commands and plain text go to the router ───────
+@bot.message_handler(content_types=["text"])
+def _route_text(message) -> None:
+    _log(message, "in", getattr(message, "text", "") or "")
+    ta_admin.route(message)
 
 
-@bot.message_handler(commands=["help"])
-def cmd_help(message):
-    lines = [
-        "/start — welcome message",
-        "/help  — show this message",
-        "/reset — clear conversation history",
-        "/about — about this bot",
-    ]
-    if HF_SPACE_ID:
-        lines.append("/model — switch AI provider")
-    bot.send_message(message.chat.id, "\n".join(lines))
-
-
-@bot.message_handler(commands=["reset"])
-def cmd_reset(message):
-    clear_history(message.from_user.id)
-    bot.send_message(message.chat.id, "Conversation cleared. Starting fresh!")
-
-
-@bot.message_handler(commands=["about"])
-def cmd_about(message):
-    if HF_SPACE_ID:
-        provider = get_provider(message.from_user.id)
-        model_line = f"{MODEL} (main)" if provider == "main" else f"{HF_SPACE_ID} (hf)"
-    else:
-        model_line = MODEL
-    bot.send_message(message.chat.id, f"Model  : {model_line}\nStorage: Upstash Redis\nHosting: Vercel")
-
-
-if HF_SPACE_ID:
-    @bot.message_handler(commands=["model"])
-    def cmd_model(message):
-        parts = (message.text or "").split(maxsplit=1)
-        if len(parts) == 1:
-            current = get_provider(message.from_user.id)
-            bot.send_message(
-                message.chat.id,
-                f"Current provider: {current}\n\n"
-                "Options:\n"
-                "/model main — Cerebras (fast, multilingual, with memory)\n"
-                "/model hf — ArmGPT (Armenian only, slow, no memory)",
-            )
-            return
-        choice = parts[1].strip().lower()
-        if choice not in ("main", "hf"):
-            bot.send_message(message.chat.id, "Invalid choice. Use: /model main or /model hf")
-            return
-        if not set_provider(message.from_user.id, choice):
-            bot.send_message(message.chat.id, "Could not save preference. Try again later.")
-            return
-        if choice == "hf":
-            bot.send_message(
-                message.chat.id,
-                "Switched to hf (ArmGPT).\n\n"
-                "Note: this is a tiny base completion model trained only on Armenian text. "
-                "It will continue whatever you write rather than answer questions, "
-                "and it does not understand English. Replies take ~30-60s and there is no memory.",
-            )
-        else:
-            bot.send_message(message.chat.id, "Switched to Main Provider.")
-
-
-@bot.message_handler(func=lambda m: True)
-def handle_message(message):
-    if not should_respond(message):
-        return
-    text = (message.text or "").replace(f"@{BOT_INFO.username}", "").strip()
-    _log(message, "in", text)
-    if is_rate_limited(message.from_user.id):
-        limit_msg = f"You've reached the daily limit of {RATE_LIMIT} messages. Try again tomorrow."
-        bot.send_message(message.chat.id, limit_msg)
-        _log(message, "out", f"[rate limited] {limit_msg}")
-        return
+# ── Group membership changes ──────────────────────────────────────────────
+@bot.my_chat_member_handler()
+def _on_my_chat_member(update) -> None:
+    """Fired when the bot is added to or removed from a chat."""
     try:
-        with keep_typing(message.chat.id):
-            reply = ask_ai(message.from_user.id, text)
-        send_reply(message, reply)
-        _log(message, "out", reply)
+        chat = update.chat
+        new_status = getattr(update.new_chat_member, "status", "")
+        title = getattr(chat, "title", None) or f"chat:{chat.id}"
+
+        if new_status in ("member", "administrator"):
+            # Bot was added (or promoted to admin) — register + welcome.
+            send_group_welcome_once(chat.id, title)
+        elif new_status in ("left", "kicked"):
+            unregister_group(chat.id)
+        # "restricted" and other intermediate states are ignored.
     except Exception as e:
-        print(f"Error in handle_message: {e}")
-        bot.send_message(message.chat.id, "Something went wrong. Please try again.")
-        _log(message, "out", f"[error] {e}")
+        print(f"[handlers] my_chat_member error: {e}")
