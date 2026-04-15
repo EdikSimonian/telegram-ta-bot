@@ -119,6 +119,10 @@ def route(message) -> None:
                 else:
                     quiz.react_invalid(p)
                 return
+            # Any non-letter text during a live quiz: shush and skip LLM.
+            # Keeps the transcript clean while students are answering.
+            quiz.react_quiet(p)
+            return
 
     # 10. Mention of another user that is NOT the bot → ignore.
     if p.mentions_other_user and not p.is_mention:

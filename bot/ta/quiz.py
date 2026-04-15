@@ -225,6 +225,11 @@ def react_invalid(p: Prepared) -> None:
     set_reaction(p.chat_id, p.message.message_id, "🤔")
 
 
+def react_quiet(p: Prepared) -> None:
+    """Off-topic chatter during an active quiz. Shush: 🤫."""
+    set_reaction(p.chat_id, p.message.message_id, "🤫")
+
+
 # ── Reveal ────────────────────────────────────────────────────────────────
 def reveal_now(chat_id: int | str) -> bool:
     """End the active quiz in ``chat_id`` and post results.

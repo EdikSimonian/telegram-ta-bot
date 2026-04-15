@@ -271,6 +271,23 @@ def test_single_letter_without_active_quiz_falls_through():
         _exit(stack)
 
 
+def test_multi_char_during_active_quiz_gets_shushed():
+    stack = _patches(quiz_active=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.quiz.maybe_inline_reveal", return_value=False), \
+             patch("bot.ta.admin.quiz.react_quiet") as shush, \
+             patch("bot.ta.admin.quiz.record_answer") as rec, \
+             patch("bot.ta.admin._answer_question") as ans:
+            from bot.ta.admin import route
+            route(_msg(username="student", text="hey what's going on"))
+            shush.assert_called_once()
+            rec.assert_not_called()
+            ans.assert_not_called()
+    finally:
+        _exit(stack)
+
+
 # ── Rule 10: @mention of another user (not bot) → ignored ─────────────────
 def test_mention_of_other_user_is_ignored():
     stack = _patches()
