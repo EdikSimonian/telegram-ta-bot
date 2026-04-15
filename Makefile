@@ -121,13 +121,16 @@ push:
 	else \
 		prod_url=$${prod_url%/}; webhook_url="$$prod_url/api/webhook"; \
 		printf "Registering Telegram webhook → %s ... " "$$webhook_url"; \
+		allowed='["message","edited_message","my_chat_member"]'; \
 		if [ -n "$$wh_secret" ]; then \
 			response=$$(curl -s -X POST "https://api.telegram.org/bot$$tg_token/setWebhook" \
 				--data-urlencode "url=$$webhook_url" \
-				--data-urlencode "secret_token=$$wh_secret"); \
+				--data-urlencode "secret_token=$$wh_secret" \
+				--data-urlencode "allowed_updates=$$allowed"); \
 		else \
 			response=$$(curl -s -X POST "https://api.telegram.org/bot$$tg_token/setWebhook" \
-				--data-urlencode "url=$$webhook_url"); \
+				--data-urlencode "url=$$webhook_url" \
+				--data-urlencode "allowed_updates=$$allowed"); \
 		fi; \
 		case "$$response" in \
 			*'"ok":true'*) echo "ok" ;; \

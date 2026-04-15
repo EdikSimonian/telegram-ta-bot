@@ -13,6 +13,8 @@ from bot.ta import announcements, commands, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
     bump_message_count,
+    list_groups as _list_groups,
+    register_group,
     remember_user_chat,
     ta_rate_check_and_inc,
     ta_rate_should_notify,
@@ -22,11 +24,20 @@ from bot.ta.tg import delete_message, send_message
 
 def _bookkeep(p: Prepared) -> None:
     """Side effects that should happen for every message, regardless of routing."""
-    # Learn user → chat id mapping so /addadmin can DM new TAs.
+    # Learn user → chat id mapping so /admin add can DM new TAs.
     remember_user_chat(p.username, p.user_id)
-    # Track participation in groups only — DM counts are useless here.
     if not p.is_dm and p.user_id:
+        # Track participation.
         bump_message_count(p.group_key, p.user_id, p.username, p.first_name)
+        # Fallback auto-register for groups the bot is already in when the
+        # webhook was first registered: my_chat_member only fires for NEW
+        # joins, so pre-existing memberships would otherwise stay invisible
+        # to /group and /announce. First message in the group triggers a
+        # register. register_group is idempotent on the hash key.
+        chat = getattr(p.message, "chat", None)
+        title = getattr(chat, "title", None) or f"chat:{p.chat_id}"
+        if not any(str(g.get("chatId")) == str(p.chat_id) for g in _list_groups()):
+            register_group(p.chat_id, title)
 
 
 def _should_rate_limit(p: Prepared) -> bool:
