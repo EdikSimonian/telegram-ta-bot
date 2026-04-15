@@ -1,9 +1,10 @@
 from unittest.mock import patch, MagicMock, call
 
 
-def make_message(chat_type="private", reply_from_id=None, text="hello"):
+def make_message(chat_type="private", reply_from_id=None, text="hello", message_id=7):
     message = MagicMock()
     message.chat.type = chat_type
+    message.message_id = message_id
     message.text = text
     message.reply_to_message = None
     if reply_from_id:
@@ -14,23 +15,46 @@ def make_message(chat_type="private", reply_from_id=None, text="hello"):
 
 # ── send_reply ─────────────────────────────────────────────────────────────────
 
-def test_send_reply_short_text():
+def test_send_reply_dm_no_reply_to():
     with patch("bot.helpers.bot") as mock_bot:
-        with patch("bot.helpers.BOT_INFO", MagicMock(id=42, username="testbot")):
-            from bot.helpers import send_reply
-            msg = make_message()
-            send_reply(msg, "Hello!")
-            mock_bot.send_message.assert_called_once_with(msg.chat.id, "Hello!", parse_mode="Markdown")
+        from bot.helpers import send_reply
+        msg = make_message(chat_type="private")
+        send_reply(msg, "Hello!")
+        call = mock_bot.send_message.call_args
+        assert "reply_to_message_id" not in call.kwargs
+
+
+def test_send_reply_group_first_chunk_replies():
+    with patch("bot.helpers.bot") as mock_bot:
+        from bot.helpers import send_reply
+        msg = make_message(chat_type="supergroup", message_id=77)
+        send_reply(msg, "Hello!")
+        call = mock_bot.send_message.call_args
+        assert call.kwargs.get("reply_to_message_id") == 77
+
+
+def test_send_reply_group_subsequent_chunks_dont_reply():
+    with patch("bot.helpers.bot") as mock_bot, \
+         patch("bot.helpers.MAX_MSG_LEN", 10):
+        from bot.helpers import send_reply
+        msg = make_message(chat_type="supergroup", message_id=77)
+        send_reply(msg, "A" * 25)
+        calls = mock_bot.send_message.call_args_list
+        assert len(calls) == 3
+        # First chunk → replies
+        assert calls[0].kwargs.get("reply_to_message_id") == 77
+        # Subsequent chunks → no reply_to
+        assert "reply_to_message_id" not in calls[1].kwargs
+        assert "reply_to_message_id" not in calls[2].kwargs
 
 
 def test_send_reply_splits_long_text():
-    with patch("bot.helpers.bot") as mock_bot:
-        with patch("bot.helpers.BOT_INFO", MagicMock(id=42, username="testbot")):
-            with patch("bot.helpers.MAX_MSG_LEN", 10):
-                from bot.helpers import send_reply
-                msg = make_message()
-                send_reply(msg, "A" * 25)
-                assert mock_bot.send_message.call_count == 3
+    with patch("bot.helpers.bot") as mock_bot, \
+         patch("bot.helpers.MAX_MSG_LEN", 10):
+        from bot.helpers import send_reply
+        msg = make_message()
+        send_reply(msg, "A" * 25)
+        assert mock_bot.send_message.call_count == 3
 
 
 # ── should_respond ─────────────────────────────────────────────────────────────

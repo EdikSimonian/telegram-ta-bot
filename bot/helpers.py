@@ -9,9 +9,22 @@ TYPING_REFRESH_SECONDS = 4
 
 
 def send_reply(message, text: str) -> None:
-    """Split and send reply in chunks if over Telegram's 4096 char limit."""
+    """Split and send reply in chunks if over Telegram's 4096 char limit.
+
+    In group chats the first chunk replies to the original message so the
+    thread stays linked; subsequent chunks post as standalone follow-ups
+    (Telegram doesn't chain reply-to through chunks well). DMs don't need
+    reply threading — it's already a 1:1 view.
+    """
+    is_group = getattr(message.chat, "type", "private") != "private"
+    first = True
     for i in range(0, len(text), MAX_MSG_LEN):
-        bot.send_message(message.chat.id, text[i:i + MAX_MSG_LEN], parse_mode="Markdown")
+        chunk = text[i:i + MAX_MSG_LEN]
+        kwargs = {"parse_mode": "Markdown"}
+        if first and is_group:
+            kwargs["reply_to_message_id"] = message.message_id
+        bot.send_message(message.chat.id, chunk, **kwargs)
+        first = False
 
 
 @contextmanager
