@@ -93,13 +93,18 @@ def route(message) -> None:
 
     # 7/8. Quiz answers while a quiz is active in this chat.
     if not p.is_dm and quiz.is_active_quiz_in(p.chat_id):
-        letter = quiz.maybe_single_letter(p)
-        if letter:
-            if letter in ("A", "B", "C", "D"):
-                quiz.record_answer(p, letter)
-            else:
-                quiz.react_invalid(p)
-            return
+        # Inline fallback: QStash dropped the callback? Reveal now and let
+        # the current message flow through as normal chatter.
+        if quiz.maybe_inline_reveal(p.chat_id):
+            pass  # fall through — quiz is over, message is just text
+        else:
+            letter = quiz.maybe_single_letter(p)
+            if letter:
+                if letter in ("A", "B", "C", "D"):
+                    quiz.record_answer(p, letter)
+                else:
+                    quiz.react_invalid(p)
+                return
 
     # 10. Mention of another user that is NOT the bot → ignore.
     if p.mentions_other_user and not p.is_mention:

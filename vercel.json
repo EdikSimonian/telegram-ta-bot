@@ -8,6 +8,10 @@
     "api/index.py": {
       "maxDuration": 60,
       "runtime": "@vercel/python@4.3.0"
+    },
+    "api/autoreveal.py": {
+      "maxDuration": 30,
+      "runtime": "@vercel/python@4.3.0"
     }
   }
 }

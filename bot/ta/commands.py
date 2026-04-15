@@ -9,6 +9,7 @@ from typing import Callable
 
 from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS
 from bot.ta import docs as docs_mod
+from bot.ta import quiz as quiz_mod
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     add_admin,
@@ -78,9 +79,11 @@ def _cmd_help(p: Prepared) -> None:
         "/doc add &lt;title&gt;\\n&lt;content&gt; — index a doc",
         "/doc update &lt;title&gt;\\n&lt;content&gt; — replace a doc",
         "/doc delete &lt;title&gt; — remove a doc",
+        "/quiz [topic] — post a multiple-choice question",
+        "/reveal — end active quiz early",
         "",
         "<b>Coming later</b>",
-        "/quiz, /reveal, /stats, /grade, /announce, /purge",
+        "/stats, /grade, /announce, /purge",
         "",
         f"<b>Valid models</b>: {', '.join(VALID_MODELS)}",
     ]
@@ -258,6 +261,30 @@ def _cmd_group(p: Prepared) -> None:
 @_register("doc")
 def _cmd_doc(p: Prepared) -> None:
     docs_mod.dispatch(p)
+
+
+# ── /quiz [topic] ─────────────────────────────────────────────────────────
+@_register("quiz")
+def _cmd_quiz(p: Prepared) -> None:
+    # Quizzes run in a group chat. If the admin triggers /quiz from DM,
+    # use the active group as the target; otherwise reply with guidance.
+    target_chat = p.chat_id if not p.is_dm else get_active_group_id()
+    if not target_chat:
+        send_message(p.user_id, "No active group. Use /group first or run /quiz in a group.")
+        return
+    topic = (p.command_args or "").strip()
+    quiz_mod.start_quiz(p, topic, target_chat)
+
+
+# ── /reveal ───────────────────────────────────────────────────────────────
+@_register("reveal")
+def _cmd_reveal(p: Prepared) -> None:
+    target_chat = p.chat_id if not p.is_dm else get_active_group_id()
+    if not target_chat:
+        send_message(p.user_id, "No active group. Use /group first or run /reveal in a group.")
+        return
+    if not quiz_mod.reveal_now(target_chat):
+        send_message(p.user_id, "No active quiz to reveal in that chat.")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
