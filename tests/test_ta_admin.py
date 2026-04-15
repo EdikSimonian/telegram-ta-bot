@@ -89,30 +89,34 @@ def _exit(stack):
 
 
 # ── Rule 3: /start is a no-op (or re-welcome in DM) ───────────────────────
-def test_start_in_dm_sends_welcome_once():
-    stack = _patches(welcomed_already=False)
-    mocks = _enter(stack)
+def test_start_in_dm_sends_welcome_text():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
     try:
-        with patch("bot.ta.admin.welcome.send_dm_welcome_once") as w, \
+        with patch("bot.clients.bot.send_message") as sm, \
              patch("bot.ta.admin.commands.dispatch") as disp, \
              patch("bot.ta.admin._answer_question") as ans:
             from bot.ta.admin import route
             route(_msg(chat_type="private", chat_id=42, text="/start"))
-            w.assert_called_once()
+            sm.assert_called_once()
+            assert "Teaching Assistant" in sm.call_args.args[1]
             disp.assert_not_called()
             ans.assert_not_called()
     finally:
         _exit(stack)
 
 
-def test_start_from_student_in_group_gets_deleted():
+def test_start_in_group_sends_group_welcome_and_deletes_command():
     stack = _patches()
     _enter(stack)
     try:
-        with patch("bot.ta.admin.delete_message") as d, \
+        with patch("bot.clients.bot.send_message") as sm, \
+             patch("bot.ta.admin.delete_message") as d, \
              patch("bot.ta.admin._answer_question") as ans:
             from bot.ta.admin import route
             route(_msg(username="student", text="/start"))
+            sm.assert_called_once()
+            assert "Welcome" in sm.call_args.args[1]
             d.assert_called_once()
             ans.assert_not_called()
     finally:

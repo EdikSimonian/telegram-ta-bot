@@ -55,13 +55,16 @@ def route(message) -> None:
     except Exception:
         traceback.print_exc()
 
-    # 3. /start is always a no-op (or re-welcome in DM). Handled before admin
-    #    dispatch so the permanent-admin doesn't trigger an unintended command
-    #    handler the first time they /start the bot.
+    # 3. /start always re-welcomes (not gated by the once-flag). In groups
+    #    we send the group welcome and delete the command message to keep
+    #    the chat clean.
     if p.is_command and p.command == "start":
         if p.is_dm:
-            welcome.send_dm_welcome_once(p.chat_id, p.user_id)
-        elif not p.is_dm and not p.is_admin:
+            from bot.clients import bot as _bot
+            _bot.send_message(p.chat_id, welcome.DM_WELCOME)
+        else:
+            from bot.clients import bot as _bot
+            _bot.send_message(p.chat_id, welcome.GROUP_WELCOME)
             delete_message(p.chat_id, p.message.message_id)
         return
 
