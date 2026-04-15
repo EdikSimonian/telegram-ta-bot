@@ -87,6 +87,8 @@ PUBLIC_URL = _normalize_public_url(PROD_URL) or _normalize_public_url(_vercel_ur
 BOT_ENV = os.environ.get("BOT_ENV", "").strip().lower() or "local"
 
 PERMANENT_ADMIN = os.environ.get("PERMANENT_ADMIN", "ediksimonian").strip().lower()
+# Human-readable instructor name for welcome messages + system prompt.
+INSTRUCTOR_NAME = os.environ.get("INSTRUCTOR_NAME", "Edik Simonian").strip()
 
 # TA bot: per-student questions in a rolling window (student-facing limit).
 TA_RATE_LIMIT        = int(os.environ.get("TA_RATE_LIMIT", "10"))
@@ -100,8 +102,8 @@ QUIZ_TIMEOUT_SECONDS = QUIZ_TIMEOUT_MINUTES * 60
 
 # ── App ───────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
-    "You are the Teaching Assistant for the Summer 2026 AI Bot Workshop in "
-    "Armenia, led by Edik Simonian (@ediksimonian).\n\n"
+    f"You are the Teaching Assistant for the Summer 2026 AI Bot Workshop in "
+    f"Armenia, led by {INSTRUCTOR_NAME} (@{PERMANENT_ADMIN}).\n\n"
     "Architecture facts (always true, never contradict):\n"
     "- This bot runs on Vercel Functions (Python) via webhook\n"
     "- State lives in Upstash Redis\n"
@@ -113,7 +115,7 @@ SYSTEM_PROMPT = (
     "based on general knowledge, but mark it clearly. Never fabricate specifics "
     "about the course architecture.\n\n"
     "Special prefix handling:\n"
-    "- `[INSTRUCTOR @ediksimonian]:` → from the instructor, highest priority\n"
+    f"- `[INSTRUCTOR @{PERMANENT_ADMIN}]:` → from the instructor, highest priority\n"
     "- `[DIRECT]:` → bot was @-mentioned or message is DM\n"
     "- `[REPLY_TO @user]:` → reply to another student, not the bot\n"
     "- `[DM]:` → private chat context, no group history\n\n"
