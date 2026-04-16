@@ -11,6 +11,11 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+def _b64url_padded(data: bytes) -> str:
+    """Mirror QStash's actual format: keep '=' padding."""
+    return base64.urlsafe_b64encode(data).decode("ascii")
+
+
 def _make_token(
     key: str, body: bytes,
     *,
@@ -19,16 +24,19 @@ def _make_token(
     exp: int | None = None,
     nbf: int | None = None,
     alg: str = "HS256",
+    pad_body_hash: bool = False,
 ) -> str:
     header = {"alg": alg, "typ": "JWT"}
     now = int(time.time())
+    body_hash = _b64url_padded(hashlib.sha256(body).digest()) if pad_body_hash \
+        else _b64url(hashlib.sha256(body).digest())
     payload = {
         "iss":  "Upstash",
         "sub":  sub,
         "iat":  iat if iat is not None else now,
         "nbf":  nbf if nbf is not None else now,
         "exp":  exp if exp is not None else now + 600,
-        "body": _b64url(hashlib.sha256(body).digest()),
+        "body": body_hash,
     }
     h = _b64url(json.dumps(header, separators=(",", ":")).encode())
     p = _b64url(json.dumps(payload, separators=(",", ":")).encode())
@@ -70,6 +78,15 @@ def test_verify_signature_tampered_body_rejected():
     tampered = b'{"chatId": "-999999"}'
     from bot.qstash import verify_signature
     assert verify_signature(token, tampered) is False
+
+
+def test_verify_signature_accepts_padded_body_hash():
+    """QStash actually sends the body hash WITH `=` padding — the verifier
+    must match regardless of padding form. Regression for the silent 401s."""
+    body = b'{"chatId": "-100123"}'
+    token = _make_token(SIGNING_KEY, body, pad_body_hash=True)
+    from bot.qstash import verify_signature
+    assert verify_signature(token, body) is True
 
 
 def test_verify_signature_expired_rejected():

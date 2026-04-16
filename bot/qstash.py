@@ -144,10 +144,12 @@ def verify_signature(
         return False
 
     # Body hash (sub-optional: older tokens may omit `body`).
+    # QStash sends the hash WITH base64 padding (`=`); both sides strip
+    # padding before comparison so encoding format doesn't matter.
     expected_body_hash = payload.get("body")
     if expected_body_hash:
-        h = base64.urlsafe_b64encode(hashlib.sha256(body).digest()).rstrip(b"=").decode()
-        if h != expected_body_hash:
+        h = base64.urlsafe_b64encode(hashlib.sha256(body).digest()).decode()
+        if h.rstrip("=") != expected_body_hash.rstrip("="):
             return False
 
     # URL binding: defense against replays to a different endpoint.

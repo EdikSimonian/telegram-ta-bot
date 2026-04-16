@@ -110,7 +110,7 @@ push:
 		case "$$key" in \
 			TELEGRAM_BOT_TOKEN) tg_token="$$value" ;; \
 			WEBHOOK_SECRET) wh_secret="$$value" ;; \
-			PROD_URL) prod_url="$$value"; continue ;; \
+			PROD_URL) prod_url="$$value" ;; \
 			VERCEL_ORG_ID|VERCEL_PROJECT_ID) continue ;; \
 		esac; \
 		if [ "$$push_envs" = "1" ]; then \
