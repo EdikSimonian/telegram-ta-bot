@@ -153,28 +153,33 @@ _STUDENT_GROUP_WAIT_SECONDS = 3
 def _answer_question(p: Prepared) -> None:
     """Run the RAG + LLM pipeline and send the reply.
 
-    In groups without a direct mention we pause briefly (§5.4) so a real
-    student can jump in first — skipping the wait for DMs, mentions, and
-    replies to the bot.
+    Typing indicator only fires when we're confident a reply is coming —
+    DMs, @mentions, and replies-to-bot. For plain group chatter the LLM
+    will most likely return IGNORE, so a typing bubble that appears and
+    disappears looks broken; better to stay silent and let the rare
+    legitimate answer just pop in.
     """
     from bot.ai import answer
     from bot.helpers import keep_typing, send_reply
 
-    if (
-        not p.is_dm
-        and not p.is_mention
-        and not p.is_reply_to_bot
-        and not p.is_admin
-    ):
+    addressed = p.is_dm or p.is_mention or p.is_reply_to_bot
+
+    # 3-second wait in groups before answering plain chatter (§5.4) so a
+    # human can reply first. Skip for direct addresses + admins.
+    if not addressed and not p.is_admin:
         import time
         time.sleep(_STUDENT_GROUP_WAIT_SECONDS)
 
     try:
-        with keep_typing(p.chat_id):
+        if addressed:
+            with keep_typing(p.chat_id):
+                reply = answer(p)
+        else:
             reply = answer(p)
         if reply:
             send_reply(p.message, reply)
     except Exception as e:
         print(f"[ta.admin] _answer_question error: {e}")
         traceback.print_exc()
-        bot.send_message(p.chat_id, "Something went wrong. Please try again.")
+        if addressed:
+            bot.send_message(p.chat_id, "Something went wrong. Please try again.")

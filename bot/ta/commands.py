@@ -74,31 +74,49 @@ def dispatch(p: Prepared) -> None:
 def _cmd_help(p: Prepared) -> None:
     lines = [
         "<b>Admin commands</b>",
+        "",
+        "<b>Basics</b>",
         "/help — this message",
         "/info — workspace config",
+        "",
+        "<b>People</b>",
         "/admin — list admins",
-        "/admin add @user — promote",
-        "/admin remove @user — demote",
+        "/admin add @user",
+        "/admin remove @user",
+        "",
+        "<b>Group</b>",
         "/group — list linked groups",
         "/group &lt;N|chatId&gt; — switch active group",
-        "/model — show current model",
+        "",
+        "<b>Model</b>",
+        "/model — list models, mark active",
         "/model &lt;name&gt; — switch chat model",
-        "/reset — clear history + default model for active group",
-        "/doc — list docs",
-        "/doc add &lt;title&gt;\\n&lt;content&gt; — index a doc",
-        "/doc update &lt;title&gt;\\n&lt;content&gt; — replace a doc",
-        "/doc delete &lt;title&gt; — remove a doc",
-        "/quiz [topic] — post a multiple-choice question",
+        "/reset — clear history + reset model for active group",
+        "",
+        "<b>Knowledge</b>",
+        "/doc — list indexed docs",
+        "/doc add &lt;title&gt;\\n&lt;content&gt;",
+        "/doc update &lt;title&gt;\\n&lt;content&gt;",
+        "/doc delete &lt;title&gt;",
+        "/git — list indexed GitHub repos",
+        "/git add &lt;owner/repo&gt;",
+        "/git sync — re-sync all repos",
+        "/git sync &lt;owner/repo&gt;",
+        "/git remove &lt;owner/repo&gt;",
+        "",
+        "<b>Engagement</b>",
+        "/quiz [topic] — post an MC question",
         "/reveal — end active quiz early",
         "/stats — message counts + quiz scores",
-        "/stats reset — clear this context's stats",
-        "/grade — engagement score per student",
-        "/grade @user — single student breakdown",
-        "/purge — bulk delete group messages + reset state",
-        "/announce &lt;message&gt; — stage an announcement for the active group",
-        "  (reply <b>send it</b> to post or <b>cancel</b> to discard)",
+        "/stats reset — clear stats for active group",
+        "/grade — engagement scores",
+        "/grade @user — single-student breakdown",
         "",
-        f"<b>Valid models</b>: {', '.join(VALID_MODELS)}",
+        "<b>Broadcast</b>",
+        "/announce &lt;message&gt; — preview, then reply <b>send it</b> or <b>cancel</b>",
+        "",
+        "<b>Cleanup</b>",
+        "/purge — bulk delete messages + reset group state",
     ]
     send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
 
@@ -203,14 +221,15 @@ def _cmd_model(p: Prepared) -> None:
     args = p.command_args.strip()
     if not args:
         current = get_active_model(p.group_key) or DEFAULT_MODEL
-        options = ", ".join(f"<code>{m}</code>" for m in VALID_MODELS)
-        send_message(
-            p.user_id,
-            f"Current model: <code>{current}</code>\n"
-            f"Valid options: {options}\n"
-            f"Usage: /model &lt;name&gt;",
-            parse_mode="HTML",
-        )
+        lines = ["<b>Available models</b>"]
+        for m in VALID_MODELS:
+            if m == current:
+                lines.append(f"• <code>{m}</code> (active)")
+            else:
+                lines.append(f"• <code>{m}</code>")
+        lines.append("")
+        lines.append("Switch: /model &lt;name&gt;")
+        send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
         return
     choice = args.split()[0]
     if choice not in VALID_MODELS:
@@ -432,23 +451,26 @@ def _cmd_git(p: Prepared) -> None:
             send_message(p.user_id, "Usage: /git add <owner/repo> or a GitHub URL")
             return
         owner, repo, branch = parsed
-        send_message(p.user_id, f"⏳ Ingesting <code>{owner}/{repo}</code>… "
-                                "this can take a minute.", parse_mode="HTML")
-        result = git_mod.sync_repo(owner, repo, branch, added_by=p.username)
+        from bot.ta.state import get_git_repo
+        if get_git_repo(owner, repo):
+            send_message(
+                p.user_id,
+                f"<code>{owner}/{repo}</code> is already indexed. Use "
+                f"<code>/git sync</code> to re-ingest or <code>/git remove</code> first.",
+                parse_mode="HTML",
+            )
+            return
+        result = git_mod.sync_repo_async(
+            owner, repo, branch, added_by=p.username, notify_chat_id=p.user_id,
+        )
         if not result.get("ok"):
             send_message(p.user_id, f"❌ Failed: {result.get('reason', 'unknown')}")
             return
         send_message(
             p.user_id,
             f"✅ <b>{owner}/{repo}</b> @ <code>{result['branch']}</code>\n"
-            f"files added: {result['files_added']}\n"
-            f"files skipped: {result['files_skipped']}\n\n"
-            f"Set up a webhook at:\n"
-            f"  <code>https://github.com/{owner}/{repo}/settings/hooks/new</code>\n"
-            "Payload URL: &lt;PROD_URL&gt;/api/github\n"
-            "Content type: application/json\n"
-            "Secret: the GITHUB_WEBHOOK_SECRET env var in this project\n"
-            "Events: Just the push event",
+            f"queued {result['files_total']} files in {result['batches']} batches.\n"
+            f"You'll get a DM when this repo finishes.",
             parse_mode="HTML",
         )
         return
@@ -467,21 +489,56 @@ def _cmd_git(p: Prepared) -> None:
         return
 
     if sub == "sync":
+        from bot.ta.state import get_git_repo, list_git_repos
+        # No arg → re-sync every tracked repo. Useful after schema/embedding changes.
+        if not arg:
+            repos = list_git_repos()
+            if not repos:
+                send_message(p.user_id, "No repos indexed. Use /git add first.")
+                return
+            lines = ["<b>Re-sync queued</b>"]
+            total = 0
+            for r in repos:
+                owner, repo = r.get("owner", ""), r.get("repo", "")
+                branch = r.get("branch") or None
+                result = git_mod.sync_repo_async(
+                    owner, repo, branch, added_by=p.username, notify_chat_id=p.user_id,
+                )
+                if result.get("ok"):
+                    n = result["files_total"]
+                    total += n
+                    lines.append(f"• <code>{owner}/{repo}</code> — {n} files")
+                else:
+                    lines.append(f"• <code>{owner}/{repo}</code> — ❌ {result.get('reason', '?')}")
+            lines.append("")
+            lines.append(f"Total: <b>{total}</b> files. You'll get a DM per repo as it finishes.")
+            send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+            return
+
         parsed = gh.parse_repo_url(arg)
         if not parsed:
-            send_message(p.user_id, "Usage: /git sync <owner/repo>")
+            send_message(p.user_id, "Usage: /git sync [<owner/repo>] (no arg = sync all)")
             return
         owner, repo, branch = parsed
-        send_message(p.user_id, f"⏳ Re-ingesting <code>{owner}/{repo}</code>…",
-                     parse_mode="HTML")
-        result = git_mod.sync_repo(owner, repo, branch, added_by=p.username)
+        if not get_git_repo(owner, repo):
+            send_message(
+                p.user_id,
+                f"<code>{owner}/{repo}</code> is not indexed. Use "
+                f"<code>/git add</code> to add it first.",
+                parse_mode="HTML",
+            )
+            return
+        result = git_mod.sync_repo_async(
+            owner, repo, branch, added_by=p.username, notify_chat_id=p.user_id,
+        )
         if not result.get("ok"):
             send_message(p.user_id, f"❌ Failed: {result.get('reason', 'unknown')}")
             return
         send_message(
             p.user_id,
-            f"✅ Synced {owner}/{repo} — added {result['files_added']}, "
-            f"skipped {result['files_skipped']}",
+            f"✅ Re-syncing <code>{owner}/{repo}</code> — "
+            f"queued {result['files_total']} files. DM on completion.",
+            parse_mode="HTML",
         )
         return
 
