@@ -16,6 +16,7 @@ QUIZ_MODEL  = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
 VALID_MODELS = [
     "gpt-5.4-nano",
     "gpt-5.4-mini",
+    "gpt-5.4",
 ]
 DEFAULT_MODEL = MODEL
 
