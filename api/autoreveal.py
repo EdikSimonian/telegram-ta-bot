@@ -9,6 +9,7 @@ from flask import Flask, request
 from bot import qstash
 from bot.config import PUBLIC_URL
 from bot.ta.quiz import reveal_now
+from bot.ta.state import get_active_quiz
 
 
 app = Flask(__name__)
@@ -32,6 +33,17 @@ def autoreveal():
     chat_id = payload.get("chatId")
     if not chat_id:
         return ("bad request", 400)
+
+    # Guard: only reveal if the CURRENT active quiz matches the one this
+    # callback was scheduled for. Without this, a stale callback from
+    # Quiz A (manually /reveal'd early) would reveal Quiz B.
+    expected_msg_id = payload.get("questionMessageId")
+    if expected_msg_id is not None:
+        active = get_active_quiz(chat_id)
+        if active is None:
+            return ("quiz already ended", 200)
+        if active.get("questionMessageId") != expected_msg_id:
+            return ("stale callback — different quiz active", 200)
 
     reveal_now(chat_id)
     return ("ok", 200)

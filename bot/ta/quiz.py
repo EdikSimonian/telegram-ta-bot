@@ -141,9 +141,12 @@ def _schedule_autoreveal(chat_id: int | str) -> bool:
         print("[ta.quiz] PUBLIC_URL unset — cannot schedule QStash callback")
         return False
     callback = f"{PUBLIC_URL}/api/autoreveal"
+    from bot.ta.state import get_active_quiz as _get_aq
+    active = _get_aq(chat_id)
+    q_msg_id = active.get("questionMessageId") if active else None
     msg_id = qstash.publish(
         callback,
-        body={"chatId": str(chat_id)},
+        body={"chatId": str(chat_id), "questionMessageId": q_msg_id},
         delay_seconds=QUIZ_TIMEOUT_SECONDS,
     )
     return bool(msg_id)
