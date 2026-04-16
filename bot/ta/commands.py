@@ -19,15 +19,19 @@ from bot.ta import stats as stats_mod
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     add_admin,
+    add_feedback,
     clear_active_model,
+    clear_feedback,
     clear_history,
     get_active_group_id,
     get_active_model,
     get_group_stats,
     get_quiz_scores,
+    get_streak,
     get_total_quizzes,
     get_user_chat,
     list_admins,
+    list_feedback,
     list_groups,
     remove_admin,
     reset_group_stats,
@@ -115,6 +119,11 @@ def _cmd_help(p: Prepared) -> None:
         "",
         "<b>Broadcast</b>",
         "/announce &lt;message&gt; — preview, then reply <b>send it</b> or <b>cancel</b>",
+        "",
+        "<b>Feedback</b>",
+        "/feedback &lt;text&gt; — submit anonymous feedback (students too)",
+        "/feedback list — view all feedback (admin)",
+        "/feedback clear — clear all feedback (admin)",
         "",
         "<b>Cleanup</b>",
         "/purge — bulk delete messages + reset group state",
@@ -325,8 +334,11 @@ def _cmd_reveal(p: Prepared) -> None:
 def _cmd_stats(p: Prepared) -> None:
     sub = (p.command_args or "").strip().lower()
     if sub == "reset":
-        reset_group_stats(p.group_key)
-        send_message(p.user_id, f"✅ Cleared stats for <code>{p.group_key}</code>.", parse_mode="HTML")
+        gk = p.group_key
+        reset_group_stats(gk)
+        send_message(p.user_id, f"✅ Cleared stats for <code>{gk}</code>.\n"
+                     "(messages, scores, quiz history, conversation history)",
+                     parse_mode="HTML")
         return
 
     stats_map  = get_group_stats(p.group_key)
@@ -386,7 +398,7 @@ def _cmd_grade(p: Prepared) -> None:
             send_message(p.user_id, f"No data for @{html.escape(target_username)} in <code>{p.group_key}</code>.",
                          parse_mode="HTML")
             return
-        send_message(p.user_id, _render_grade_detail(match), parse_mode="HTML")
+        send_message(p.user_id, _render_grade_detail(match, p.group_key), parse_mode="HTML")
         return
 
     if not engagement:
@@ -394,26 +406,41 @@ def _cmd_grade(p: Prepared) -> None:
         return
 
     engagement.sort(key=lambda e: e.total_pts, reverse=True)
-    lines = [f"<b>Engagement</b> — <code>{p.group_key}</code> (quizzes posted: {total_q})", ""]
+    lines = [
+        f"<b>Engagement</b> — <code>{p.group_key}</code>",
+        f"Quizzes posted: {total_q}",
+        "",
+        "<b>Scoring formula (out of 100):</b>",
+        f"  30% messages (capped at 20)",
+        f"  40% quiz participation (attempted / {total_q})",
+        f"  30% quiz accuracy (correct / attempted)",
+        "",
+    ]
     for e in engagement[:25]:
-        flag = " ⚠️" if e.inactive else ""
+        flag = " \u26a0\ufe0f" if e.inactive else ""
+        streak = get_streak(p.group_key, e.user_id)
+        streak_badge = f" \U0001f525{streak}" if streak >= 2 else ""
+        pct = f"{e.accuracy_pct:.0f}%" if e.attempts else "n/a"
         lines.append(
-            f"• {html.escape(e.display_name)}{flag} — <b>{e.total_pts:.0f}/100</b>  "
-            f"(msgs {e.messages_pts:.0f} / part {e.particip_pts:.0f} / acc {e.accuracy_pts:.0f})"
+            f"\u2022 {html.escape(e.display_name)}{streak_badge}{flag} \u2014 <b>{e.total_pts:.0f}</b>  "
+            f"({e.messages} msgs, {e.attempts}/{total_q} quizzes, {e.correct}/{e.attempts} correct [{pct}])"
         )
     send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
 
 
-def _render_grade_detail(e: "stats_mod.Engagement") -> str:
-    flag = " ⚠️ (inactive >7d)" if e.inactive else ""
+def _render_grade_detail(e: "stats_mod.Engagement", group_key: str) -> str:
+    flag = " \u26a0\ufe0f (inactive >7d)" if e.inactive else ""
+    streak = get_streak(group_key, e.user_id)
+    streak_line = f"\n  \u2022 Streak: \U0001f525{streak} consecutive correct" if streak >= 2 else "\n  \u2022 Streak: 0"
     return (
         f"<b>{html.escape(e.display_name)}</b>{flag}\n"
         f"Total: <b>{e.total_pts:.0f}/100</b>\n"
-        f"  • Messages: {e.messages} → {e.messages_pts:.0f}/{stats_mod.W_MESSAGES}\n"
-        f"  • Participation: {e.attempts}/{e.total_quizzes} "
-        f"({e.participation_pct:.0f}%) → {e.particip_pts:.0f}/{stats_mod.W_PARTICIPATION}\n"
-        f"  • Accuracy: {e.correct}/{e.attempts} "
-        f"({e.accuracy_pct:.0f}%) → {e.accuracy_pts:.0f}/{stats_mod.W_ACCURACY}"
+        f"  \u2022 Messages: {e.messages} sent (max 20 counted) \u2192 {e.messages_pts:.0f}/{stats_mod.W_MESSAGES}\n"
+        f"  \u2022 Participation: {e.attempts}/{e.total_quizzes} quizzes attempted "
+        f"({e.participation_pct:.0f}%) \u2192 {e.particip_pts:.0f}/{stats_mod.W_PARTICIPATION}\n"
+        f"  \u2022 Accuracy: {e.correct}/{e.attempts} correct "
+        f"({e.accuracy_pct:.0f}%) \u2192 {e.accuracy_pts:.0f}/{stats_mod.W_ACCURACY}"
+        f"{streak_line}"
     )
 
 
@@ -561,7 +588,8 @@ def _cmd_purge(p: Prepared) -> None:
 
     purged = 0
     migrated_to: str | None = None
-    for mid in range(2, current_id + 1):
+    start = max(2, current_id - 499)
+    for mid in range(start, current_id + 1):
         try:
             _bot.delete_message(target_chat, mid)
             purged += 1
@@ -585,6 +613,40 @@ def _cmd_purge(p: Prepared) -> None:
         f"✅ Purged {purged} messages and cleared state for <code>{p.group_key}</code>.{extra}",
         parse_mode="HTML",
     )
+
+
+# ── /feedback ─────────────────────────────────────────────────────────────
+@_register("feedback")
+def _cmd_feedback(p: Prepared) -> None:
+    """Admin sub-commands: list / clear.  Student usage is handled by the
+    router in admin.py before this dispatcher is ever called."""
+    args = (p.command_args or "").strip()
+    tokens = args.split()
+    sub = tokens[0].lower() if tokens else ""
+
+    if sub == "list":
+        entries = list_feedback()
+        if not entries:
+            send_message(p.user_id, "No feedback yet.")
+            return
+        lines = [f"<b>Feedback</b> ({len(entries)} entries)"]
+        for i, fb in enumerate(entries, 1):
+            who = f"@{fb['username']}" if fb.get("username") else "(anon)"
+            lines.append(f"{i}. {html.escape(fb.get('text', ''))} — {who}")
+        send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if sub == "clear":
+        clear_feedback()
+        send_message(p.user_id, "✅ All feedback cleared.")
+        return
+
+    # Admin submitting their own feedback — same path as students.
+    if not args:
+        send_message(p.user_id, "Usage: /feedback <text>")
+        return
+    add_feedback(args, p.username)
+    send_message(p.user_id, "✅ Feedback received. Thank you!")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

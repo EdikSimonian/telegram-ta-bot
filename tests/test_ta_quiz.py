@@ -207,6 +207,7 @@ def test_reveal_now_scores_correct_and_wrong():
     }
     with patch("bot.ta.quiz.get_active_quiz", return_value=existing), \
          patch("bot.ta.quiz.record_quiz_score") as rqs, \
+         patch("bot.ta.quiz.update_streak", return_value=0), \
          patch("bot.ta.quiz.clear_active_quiz") as clear, \
          patch("bot.ta.quiz.send_message") as sm:
         from bot.ta.quiz import reveal_now
@@ -217,6 +218,55 @@ def test_reveal_now_scores_correct_and_wrong():
         assert calls["99"]["correct"] is False
         clear.assert_called_once_with(-100123)
         assert "Time's up" in sm.call_args.args[1]
+
+
+def test_reveal_now_updates_streaks():
+    existing = {
+        "correctAnswer": "B",
+        "answers": {
+            "42": {"letter": "B", "username": "alice", "firstName": "Alice"},
+            "99": {"letter": "A", "username": "bob", "firstName": "Bob"},
+        },
+        "startTime": int(time.time()),
+    }
+    def _streak_effect(gk, uid, correct):
+        return 1 if correct else 0
+    with patch("bot.ta.quiz.get_active_quiz", return_value=existing), \
+         patch("bot.ta.quiz.record_quiz_score"), \
+         patch("bot.ta.quiz.update_streak", side_effect=_streak_effect) as us, \
+         patch("bot.ta.quiz.clear_active_quiz"), \
+         patch("bot.ta.quiz.send_message"):
+        from bot.ta.quiz import reveal_now
+        reveal_now(-100123)
+        streak_calls = {c.args[1]: c.args[2] for c in us.call_args_list}
+        # Alice correct → True, Bob wrong → False
+        assert streak_calls["42"] is True
+        assert streak_calls["99"] is False
+
+
+def test_reveal_now_shows_streak_badge_when_gte_2():
+    existing = {
+        "correctAnswer": "B",
+        "answers": {
+            "42": {"letter": "B", "username": "alice", "firstName": "Alice"},
+            "99": {"letter": "B", "username": "bob", "firstName": "Bob"},
+        },
+        "startTime": int(time.time()),
+    }
+    def _streak_side_effect(gk, uid, correct):
+        # Alice gets streak 3, Bob gets streak 1
+        return 3 if uid == "42" else 1
+    with patch("bot.ta.quiz.get_active_quiz", return_value=existing), \
+         patch("bot.ta.quiz.record_quiz_score"), \
+         patch("bot.ta.quiz.update_streak", side_effect=_streak_side_effect), \
+         patch("bot.ta.quiz.clear_active_quiz"), \
+         patch("bot.ta.quiz.send_message") as sm:
+        from bot.ta.quiz import reveal_now
+        reveal_now(-100123)
+        text = sm.call_args.args[1]
+        # Alice should have fire badge, Bob should not
+        assert "\U0001f5253" in text   # 🔥3
+        assert "Bob \U0001f525" not in text
 
 
 def test_reveal_now_idempotent_when_no_active():

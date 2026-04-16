@@ -93,6 +93,26 @@ def route(message) -> None:
         # Unrecognized reply → fall through to normal processing without
         # clearing the pending state (spec §5.12).
 
+    # 3b. /feedback is open to ALL users (students included).
+    #     Handle it before the admin gate so non-admins aren't blocked.
+    if p.is_command and p.command == "feedback":
+        if not p.is_dm:
+            # In groups: delete for privacy, reply via DM.
+            delete_message(p.chat_id, p.message.message_id)
+        if p.is_admin:
+            # Admins get the full sub-commands (list, clear, submit).
+            commands.dispatch(p)
+        else:
+            # Students: store the feedback text.
+            from bot.ta.state import add_feedback
+            text = (p.command_args or "").strip()
+            if not text:
+                send_message(p.user_id, "Usage: /feedback <text>")
+            else:
+                add_feedback(text, p.username)
+                send_message(p.user_id, "\u2705 Feedback received. Thank you!")
+        return
+
     # 4. Admin + command.
     if p.is_admin and p.is_command:
         if not p.is_dm:

@@ -34,8 +34,10 @@ K_DM_WELCOMED      = f"{_P}dmWelcomed"
 K_KNOWN_THREADS    = f"{_P}knownThreads"
 K_DOCS             = f"{_P}docs"
 K_GIT_REPOS        = f"{_P}gitrepos"
+K_FEEDBACK          = f"{_P}feedback"
 
 QUIZ_HISTORY_CAP = 20
+FEEDBACK_CAP = 100
 
 
 def _k_rate(user_id: int | str) -> str:
@@ -64,6 +66,14 @@ def _k_total_quizzes(group_key: str) -> str:
 
 def _k_quiz_history(group_key: str) -> str:
     return f"{_P}group:{group_key}:quizHistory"
+
+
+def _k_streak(group_key: str, user_id: int | str) -> str:
+    return f"{_P}group:{group_key}:streak:{user_id}"
+
+
+def _k_streak_users(group_key: str) -> str:
+    return f"{_P}group:{group_key}:streakUsers"
 
 
 def _k_active_quiz(chat_id: int | str) -> str:
@@ -216,6 +226,8 @@ def ta_rate_check_and_inc(user_id: int | str, limit: int, window: int = TA_RATE_
         count = redis.incr(key)
         if count == 1:
             redis.expire(key, window)
+        elif redis.ttl(key) == -1:
+            redis.expire(key, window)
         if count > limit:
             return False, 0
         return True, max(0, limit - count)
@@ -344,8 +356,39 @@ def get_total_quizzes(group_key: str) -> int:
         return 0
 
 
+# ── Streaks ──────────────────────────────────────────────────────────────
+def get_streak(group_key: str, user_id: int | str) -> int:
+    """Return the current consecutive-correct streak for a student."""
+    val = _safe(lambda: redis.get(_k_streak(group_key, user_id)), default=0)
+    try:
+        return int(val or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def update_streak(group_key: str, user_id: int | str, correct: bool) -> int:
+    """Increment streak on correct, reset to 0 on wrong. Returns new value.
+
+    Also tracks the user id in a set so ``reset_group_stats`` can clean up.
+    """
+    if redis is None:
+        return 0
+    try:
+        streak_key = _k_streak(group_key, user_id)
+        if correct:
+            new_val = redis.incr(streak_key)
+        else:
+            redis.set(streak_key, "0")
+            new_val = 0
+        redis.sadd(_k_streak_users(group_key), str(user_id))
+        return int(new_val)
+    except Exception as e:
+        print(f"[ta.state] update_streak error: {e}")
+        return 0
+
+
 def reset_group_stats(group_key: str) -> None:
-    """Wipe stats/scores/history/totalQuizzes/quizHistory for a group."""
+    """Wipe stats/scores/history/totalQuizzes/quizHistory/streaks for a group."""
     if redis is None:
         return
     try:
@@ -354,6 +397,12 @@ def reset_group_stats(group_key: str) -> None:
         redis.delete(_k_total_quizzes(group_key))
         redis.delete(_k_quiz_history(group_key))
         redis.delete(_k_history(group_key))
+        # Clear streak keys for all tracked users.
+        streak_users_key = _k_streak_users(group_key)
+        members = redis.smembers(streak_users_key) or set()
+        for uid in members:
+            redis.delete(_k_streak(group_key, uid))
+        redis.delete(streak_users_key)
     except Exception as e:
         print(f"[ta.state] reset_group_stats error: {e}")
 
@@ -559,3 +608,37 @@ def thread_slug(chat_type: str, chat_id: int | str, user_id: int | str | None = 
     if chat_type in ("group", "supergroup", "channel"):
         return f"tg-group-{str(chat_id).lstrip('-')}"
     return f"tg-dm-{user_id if user_id is not None else chat_id}"
+
+
+# ── Feedback ─────────────────────────────────────────────────────────────
+def add_feedback(text: str, username: str | None = None) -> None:
+    """Append anonymous feedback. Capped at FEEDBACK_CAP entries."""
+    if redis is None:
+        return
+    try:
+        payload = json.dumps({
+            "text": text,
+            "username": username,
+            "ts": int(time.time()),
+        })
+        redis.rpush(K_FEEDBACK, payload)
+        redis.ltrim(K_FEEDBACK, -FEEDBACK_CAP, -1)
+    except Exception as e:
+        print(f"[ta.state] add_feedback error: {e}")
+
+
+def list_feedback() -> list[dict]:
+    """Return all stored feedback entries."""
+    raw = _safe(lambda: redis.lrange(K_FEEDBACK, 0, -1), default=[]) or []
+    out: list[dict] = []
+    for item in raw:
+        try:
+            out.append(json.loads(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def clear_feedback() -> None:
+    """Delete all feedback."""
+    _safe(lambda: redis.delete(K_FEEDBACK))

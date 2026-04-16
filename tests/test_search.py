@@ -55,6 +55,9 @@ def test_web_search_sends_correct_payload():
         payload = mock_post.call_args[1]["json"]
         assert payload["query"] == "test query"
         assert payload["max_results"] == 5
+        assert payload["search_depth"] == "basic"
+        assert payload["include_answer"] is False
+        assert payload["safe_search"] == "strict"
 
 
 def test_web_search_returns_cached_result():

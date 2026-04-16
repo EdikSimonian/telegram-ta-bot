@@ -32,6 +32,7 @@ from bot.ta.state import (
     push_quiz_history,
     record_quiz_score,
     set_active_quiz,
+    update_streak,
 )
 from bot.ta.tg import send_message, set_reaction
 
@@ -256,7 +257,9 @@ def reveal_now(chat_id: int | str) -> bool:
             group_key, uid, data.get("username"), data.get("firstName"),
             correct=is_right,
         )
-        (right if is_right else wrong).append(name)
+        streak = update_streak(group_key, uid, is_right)
+        label = f"{name} \U0001f525{streak}" if streak >= 2 else name
+        (right if is_right else wrong).append(label)
 
     lines = [
         "⏰ <b>Time's up!</b>",

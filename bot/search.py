@@ -25,7 +25,14 @@ def web_search(query: str, count: int = 5) -> tuple[str, list[dict]]:
 
     response = requests.post(
         TAVILY_ENDPOINT,
-        json={"api_key": TAVILY_API_KEY, "query": query, "max_results": count},
+        json={
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "max_results": count,
+            "search_depth": "basic",
+            "include_answer": False,
+            "safe_search": "strict",
+        },
         timeout=10,
     )
     response.raise_for_status()

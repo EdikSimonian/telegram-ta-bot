@@ -151,7 +151,8 @@ SYSTEM_PROMPT = (
     "almost always IGNORE\n"
     "- `[DM]:` → private chat context, no group history\n\n"
     "Format: plain text, short paragraphs, prefer bullet points for lists. "
-    "No HTML unless asked."
+    "No HTML unless asked.\n"
+    "Language: match the student's language. If they write in Armenian, reply in Armenian. If in Russian, reply in Russian. Default to English."
 )
 MAX_HISTORY   = 20
 HISTORY_TTL   = 2592000   # 30 days

@@ -267,6 +267,47 @@ def test_group_unknown_rejected():
         sag.assert_not_called()
 
 
+# ── /purge ────────────────────────────────────────────────────────────────
+def test_purge_caps_range_to_500_messages():
+    """Even with a high message_id, purge only attempts the most recent 500."""
+    msg = MagicMock()
+    msg.message_id = 60000
+    p = _prepared(command="purge", is_dm=False)
+    p.message = msg
+    p.chat_id = -100123
+
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.get_active_group_id", return_value="-100123"), \
+         patch("bot.ta.commands._bot") as mock_bot, \
+         patch("bot.ta.commands.reset_group_stats"):
+        from bot.ta.commands import _cmd_purge
+        _cmd_purge(p)
+        # Should start at max(2, 60000-499)=59501, so 500 calls (59501..60000)
+        assert mock_bot.delete_message.call_count == 500
+        first_call_mid = mock_bot.delete_message.call_args_list[0].args[1]
+        assert first_call_mid == 59501
+
+
+def test_purge_small_chat_starts_at_2():
+    """When message_id is small (< 501), range starts at 2."""
+    msg = MagicMock()
+    msg.message_id = 10
+    p = _prepared(command="purge", is_dm=False)
+    p.message = msg
+    p.chat_id = -100123
+
+    with patch("bot.ta.commands.send_message"), \
+         patch("bot.ta.commands.get_active_group_id", return_value="-100123"), \
+         patch("bot.ta.commands._bot") as mock_bot, \
+         patch("bot.ta.commands.reset_group_stats"):
+        from bot.ta.commands import _cmd_purge
+        _cmd_purge(p)
+        # range(2, 11) = 9 calls
+        assert mock_bot.delete_message.call_count == 9
+        first_call_mid = mock_bot.delete_message.call_args_list[0].args[1]
+        assert first_call_mid == 2
+
+
 # ── dispatch ──────────────────────────────────────────────────────────────
 def test_dispatch_unknown_command_replies_not_implemented():
     with patch("bot.ta.commands.send_message") as sm:
@@ -282,3 +323,69 @@ def test_dispatch_routes_to_registered_handler():
         from bot.ta.commands import dispatch
         dispatch(_prepared(command="admin"))
         assert "@ediksimonian" in sm.call_args.args[1]
+
+
+# ── /feedback ────────────────────────────────────────────────────────────
+def test_feedback_student_stores_text():
+    """A non-admin student submitting feedback via the command handler."""
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.add_feedback") as af:
+        from bot.ta.commands import _cmd_feedback
+        p = _prepared(command="feedback", command_args="great class today", username="student1")
+        p.is_admin = False
+        _cmd_feedback(p)
+        af.assert_called_once_with("great class today", "student1")
+        assert "Feedback received" in sm.call_args.args[1]
+
+
+def test_feedback_admin_stores_text():
+    """An admin submitting feedback (no sub-command) also stores it."""
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.add_feedback") as af:
+        from bot.ta.commands import _cmd_feedback
+        p = _prepared(command="feedback", command_args="could be better")
+        _cmd_feedback(p)
+        af.assert_called_once_with("could be better", "alice")
+        assert "Feedback received" in sm.call_args.args[1]
+
+
+def test_feedback_list_returns_entries():
+    entries = [
+        {"text": "nice!", "username": "bob", "ts": 1},
+        {"text": "more quizzes", "username": None, "ts": 2},
+    ]
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.list_feedback", return_value=entries):
+        from bot.ta.commands import _cmd_feedback
+        _cmd_feedback(_prepared(command="feedback", command_args="list"))
+        text = sm.call_args.args[1]
+        assert "nice!" in text
+        assert "more quizzes" in text
+        assert "@bob" in text
+        assert "(anon)" in text
+
+
+def test_feedback_list_empty():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.list_feedback", return_value=[]):
+        from bot.ta.commands import _cmd_feedback
+        _cmd_feedback(_prepared(command="feedback", command_args="list"))
+        assert "No feedback yet" in sm.call_args.args[1]
+
+
+def test_feedback_clear():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.clear_feedback") as cf:
+        from bot.ta.commands import _cmd_feedback
+        _cmd_feedback(_prepared(command="feedback", command_args="clear"))
+        cf.assert_called_once()
+        assert "cleared" in sm.call_args.args[1].lower()
+
+
+def test_feedback_no_text_shows_usage():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.add_feedback") as af:
+        from bot.ta.commands import _cmd_feedback
+        _cmd_feedback(_prepared(command="feedback", command_args=""))
+        assert "Usage" in sm.call_args.args[1]
+        af.assert_not_called()

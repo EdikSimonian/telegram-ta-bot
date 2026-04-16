@@ -151,6 +151,20 @@ def test_rate_check_blocks_over_limit():
         assert remaining == 0
 
 
+def test_rate_check_recovers_ttl_when_missing():
+    """If a key lost its TTL (crash between INCR and EXPIRE), the recovery
+    branch sets it retroactively so the key doesn't block forever."""
+    r = _fresh_redis()
+    r.incr.return_value = 5  # not first hit, so count != 1
+    r.ttl.return_value = -1  # key exists but has no TTL
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import ta_rate_check_and_inc
+        allowed, remaining = ta_rate_check_and_inc(42, limit=10, window=3600)
+        assert allowed is True
+        assert remaining == 5
+        r.expire.assert_called_with("ta:rate:42", 3600)
+
+
 def test_rate_check_fails_open_when_redis_down():
     with patch("bot.ta.state.redis", None):
         from bot.ta.state import ta_rate_check_and_inc
@@ -240,8 +254,9 @@ def test_record_quiz_score_wrong_increments_only_total():
         assert written["total"] == 1
 
 
-def test_reset_group_stats_clears_five_keys():
+def test_reset_group_stats_clears_all_keys_including_streaks():
     r = _fresh_redis()
+    r.smembers.return_value = {"42", "99"}
     with patch("bot.ta.state.redis", r):
         from bot.ta.state import reset_group_stats
         reset_group_stats("g1")
@@ -251,6 +266,60 @@ def test_reset_group_stats_clears_five_keys():
         assert "ta:group:g1:totalQuizzes" in deleted
         assert "ta:group:g1:quizHistory" in deleted
         assert "ta:history:g1" in deleted
+        # Streak keys for each tracked user + the set itself
+        assert "ta:group:g1:streak:42" in deleted
+        assert "ta:group:g1:streak:99" in deleted
+        assert "ta:group:g1:streakUsers" in deleted
+
+
+# ── Streaks ──────────────────────────────────────────────────────────────
+def test_get_streak_returns_zero_when_no_data():
+    r = _fresh_redis()
+    r.get.return_value = None
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import get_streak
+        assert get_streak("g1", 42) == 0
+
+
+def test_get_streak_returns_stored_value():
+    r = _fresh_redis()
+    r.get.return_value = "5"
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import get_streak
+        assert get_streak("g1", 42) == 5
+
+
+def test_update_streak_increments_on_correct():
+    r = _fresh_redis()
+    r.incr.return_value = 3
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import update_streak
+        result = update_streak("g1", 42, correct=True)
+        assert result == 3
+        r.incr.assert_called_with("ta:group:g1:streak:42")
+        r.sadd.assert_called_with("ta:group:g1:streakUsers", "42")
+
+
+def test_update_streak_resets_on_wrong():
+    r = _fresh_redis()
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import update_streak
+        result = update_streak("g1", 42, correct=False)
+        assert result == 0
+        r.set.assert_any_call("ta:group:g1:streak:42", "0")
+        r.sadd.assert_called_with("ta:group:g1:streakUsers", "42")
+
+
+def test_get_streak_returns_zero_when_redis_none():
+    with patch("bot.ta.state.redis", None):
+        from bot.ta.state import get_streak
+        assert get_streak("g1", 42) == 0
+
+
+def test_update_streak_returns_zero_when_redis_none():
+    with patch("bot.ta.state.redis", None):
+        from bot.ta.state import update_streak
+        assert update_streak("g1", 42, correct=True) == 0
 
 
 # ── Quiz history ──────────────────────────────────────────────────────────
@@ -342,3 +411,39 @@ def test_remove_doc_rewrites_list_without_slug():
         pushed = [c.args[1] for c in r.rpush.call_args_list]
         assert len(pushed) == 1
         assert json.loads(pushed[0])["slug"] == "cs102"
+
+
+# ── Feedback ─────────────────────────────────────────────────────────────
+def test_add_feedback_rpush_and_ltrim():
+    r = _fresh_redis()
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import add_feedback
+        add_feedback("great class", "alice")
+        r.rpush.assert_called_once()
+        payload = json.loads(r.rpush.call_args.args[1])
+        assert payload["text"] == "great class"
+        assert payload["username"] == "alice"
+        assert "ts" in payload
+        r.ltrim.assert_called_once_with("ta:feedback", -100, -1)
+
+
+def test_list_feedback_parses_entries():
+    r = _fresh_redis()
+    r.lrange.return_value = [
+        json.dumps({"text": "good", "username": "bob", "ts": 1}),
+        json.dumps({"text": "bad", "username": None, "ts": 2}),
+    ]
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import list_feedback
+        out = list_feedback()
+        assert len(out) == 2
+        assert out[0]["text"] == "good"
+        assert out[1]["username"] is None
+
+
+def test_clear_feedback_deletes_key():
+    r = _fresh_redis()
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import clear_feedback
+        clear_feedback()
+        r.delete.assert_called_with("ta:feedback")
