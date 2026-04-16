@@ -38,7 +38,7 @@ K_FEEDBACK          = f"{_P}feedback"
 
 QUIZ_HISTORY_CAP = 20
 FEEDBACK_CAP = 100
-DM_FOLLOWUP_TTL = 1800  # 30 minutes
+DM_FOLLOWUP_TTL = 86400  # 24 hours
 
 
 def _k_last_group_qa(user_id: int | str) -> str:
