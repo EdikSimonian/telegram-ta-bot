@@ -38,6 +38,11 @@ K_FEEDBACK          = f"{_P}feedback"
 
 QUIZ_HISTORY_CAP = 20
 FEEDBACK_CAP = 100
+DM_FOLLOWUP_TTL = 1800  # 30 minutes
+
+
+def _k_last_group_qa(user_id: int | str) -> str:
+    return f"{_P}lastGroupQA:{user_id}"
 
 
 def _k_rate(user_id: int | str) -> str:
@@ -527,6 +532,34 @@ def remove_doc(slug: str) -> None:
             redis.rpush(K_DOCS, json.dumps(d))
     except Exception as e:
         print(f"[ta.state] remove_doc error: {e}")
+
+
+# ── Last group Q&A per student (for DM follow-up) ─────────────────────────
+def save_last_group_qa(user_id: int | str, question: str, answer: str, group_key: str) -> None:
+    """Snapshot the student's last group Q&A so DM follow-ups have context."""
+    if redis is None:
+        return
+    try:
+        payload = json.dumps({
+            "question": question,
+            "answer": answer,
+            "groupKey": group_key,
+            "ts": int(time.time()),
+        })
+        redis.set(_k_last_group_qa(user_id), payload, ex=DM_FOLLOWUP_TTL)
+    except Exception as e:
+        print(f"[ta.state] save_last_group_qa error: {e}")
+
+
+def get_last_group_qa(user_id: int | str) -> dict | None:
+    """Return the student's last group Q&A if it exists and hasn't expired."""
+    raw = _safe(lambda: redis.get(_k_last_group_qa(user_id)), default=None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 # ── Git repos (for RAG auto-sync) ─────────────────────────────────────────

@@ -34,16 +34,18 @@ def test_answer_no_rag_hits_calls_model_without_context():
     with patch("bot.ai.rag.retrieve", return_value=[]), \
          patch("bot.ai.get_history", return_value=[]), \
          patch("bot.ai.append_history") as ah, \
+         patch("bot.ai.save_last_group_qa"), \
          patch("bot.ai.get_active_model", return_value=None), \
          patch("bot.ai.ai") as client:
         client.chat.completions.create.return_value = _mock_ai_response("hello")
         from bot.ai import answer
         out = answer(_prepared())
-        assert out == "hello"
+        assert out.startswith("hello")
+        assert "DM me" in out  # group replies get the follow-up nudge
         system_msg = client.chat.completions.create.call_args.kwargs["messages"][0]
         assert system_msg["role"] == "system"
         assert "Course context" not in system_msg["content"]
-        assert ah.call_count == 2  # user + assistant saved
+        assert ah.call_count == 2
 
 
 def test_answer_with_rag_hits_injects_context_and_citations():

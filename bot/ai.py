@@ -26,6 +26,8 @@ from bot.ta.state import (
     append_history,
     get_active_model,
     get_history,
+    get_last_group_qa,
+    save_last_group_qa,
 )
 
 
@@ -92,6 +94,22 @@ def answer(p: Prepared) -> str | None:
     if extra_system:
         messages.append({"role": "system", "content": extra_system})
 
+    # In DMs: inject the student's last group Q&A as context so follow-ups
+    # work without the student having to re-state the question.
+    if p.is_dm:
+        prior = get_last_group_qa(p.user_id)
+        if prior:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The student is following up on a recent group conversation. "
+                    "Here is the original exchange:\n\n"
+                    f"Student asked: {prior.get('question', '')}\n"
+                    f"You replied: {prior.get('answer', '')}\n\n"
+                    "Use this as context for the follow-up question below."
+                ),
+            })
+
     history = get_history(p.group_key, limit=MAX_HISTORY)
     for turn in history:
         role = turn.get("role")
@@ -123,6 +141,10 @@ def answer(p: Prepared) -> str | None:
     append_history(p.group_key, "user", user_payload, limit=MAX_HISTORY)
     append_history(p.group_key, "assistant", reply, limit=MAX_HISTORY)
 
+    # 4b. In groups: snapshot this Q&A per student so DM follow-ups work.
+    if not p.is_dm:
+        save_last_group_qa(p.user_id, raw, reply, p.group_key)
+
     # 5. Append source citations when RAG hit something.
     if matches:
         seen_urls: set[str] = set()
@@ -138,5 +160,9 @@ def answer(p: Prepared) -> str | None:
             else:
                 sources.append(f"• {title}")
         reply = f"{reply}\n\n**Sources:**\n" + "\n".join(sources[:5])
+
+    # 6. In groups: nudge students to DM for follow-up.
+    if not p.is_dm:
+        reply += "\n\n_DM me if you'd like to ask follow-up questions._"
 
     return reply
