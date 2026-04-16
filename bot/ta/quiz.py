@@ -20,6 +20,7 @@ from bot.config import (
     DEFAULT_MODEL,
     PUBLIC_URL,
     QUIZ_MODEL,
+    QUIZ_TIMEOUT_MINUTES,
     QUIZ_TIMEOUT_SECONDS,
 )
 from bot import qstash
@@ -79,7 +80,7 @@ def format_question_for_display(raw: str) -> str:
     return (
         "✨✨✨ <b>QUIZ TIME!</b> ✨✨✨\n\n"
         f"{body}\n\n"
-        "⏰ <i>Reply with A, B, C, or D — you have 3 minutes!</i>"
+        f"⏰ <i>Reply with A, B, C, or D — you have {QUIZ_TIMEOUT_MINUTES} minutes!</i>"
     )
 
 
