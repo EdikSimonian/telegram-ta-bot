@@ -20,7 +20,13 @@ def send_reply(message, text: str) -> None:
     first = True
     for i in range(0, len(text), MAX_MSG_LEN):
         chunk = text[i:i + MAX_MSG_LEN]
-        kwargs = {"parse_mode": "Markdown"}
+        # Citation URLs (RAG sources, blob links) trigger noisy previews
+        # in chat. Suppressed always — bot replies are conversational, not
+        # link-shares.
+        kwargs = {
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
         if first and is_group:
             kwargs["reply_to_message_id"] = message.message_id
         bot.send_message(message.chat.id, chunk, **kwargs)

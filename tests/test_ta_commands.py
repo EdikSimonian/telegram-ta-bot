@@ -28,7 +28,7 @@ def _prepared(
 
 
 # ── /help ─────────────────────────────────────────────────────────────────
-def test_help_lists_commands_and_models():
+def test_help_lists_commands_without_models_section():
     with patch("bot.ta.commands.send_message") as sm:
         from bot.ta.commands import _cmd_help
         _cmd_help(_prepared(command="help"))
@@ -36,7 +36,8 @@ def test_help_lists_commands_and_models():
         assert "/help" in text
         assert "/admin add" in text
         assert "/group" in text
-        assert "gpt-5.4-nano" in text
+        # /help no longer dumps the model list — that's /model's job.
+        assert "Valid models" not in text
 
 
 # ── /info ─────────────────────────────────────────────────────────────────
@@ -151,14 +152,31 @@ def test_reset_clears_history_and_model():
 
 
 # ── /model ────────────────────────────────────────────────────────────────
-def test_model_no_args_shows_current_and_options():
+def test_model_no_args_lists_all_with_active_marker():
     with patch("bot.ta.commands.send_message") as sm, \
          patch("bot.ta.commands.get_active_model", return_value=None):
         from bot.ta.commands import _cmd_model
         _cmd_model(_prepared(command="model"))
         text = sm.call_args.args[1]
         assert "gpt-5.4-nano" in text
-        assert "Valid options" in text
+        assert "gpt-5.4-mini" in text
+        # Current (default) should be marked
+        assert "(active)" in text
+        # And only the active line carries the marker
+        active_lines = [ln for ln in text.splitlines() if "(active)" in ln]
+        assert len(active_lines) == 1
+        assert "gpt-5.4-nano" in active_lines[0]
+
+
+def test_model_no_args_marks_overridden_model_active():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.get_active_model", return_value="gpt-5.4-mini"):
+        from bot.ta.commands import _cmd_model
+        _cmd_model(_prepared(command="model"))
+        text = sm.call_args.args[1]
+        active_lines = [ln for ln in text.splitlines() if "(active)" in ln]
+        assert len(active_lines) == 1
+        assert "gpt-5.4-mini" in active_lines[0]
 
 
 def test_model_invalid_rejected():
