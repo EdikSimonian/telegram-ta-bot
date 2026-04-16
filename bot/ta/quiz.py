@@ -11,6 +11,7 @@ Flow:
 """
 from __future__ import annotations
 
+import html as _html
 import re
 import time
 
@@ -248,7 +249,8 @@ def reveal_now(chat_id: int | str) -> bool:
     wrong: list[str] = []
     for uid, data in answers.items():
         letter = (data.get("letter") or "").upper()
-        name = data.get("firstName") or data.get("username") or f"user:{uid}"
+        raw_name = data.get("firstName") or data.get("username") or f"user:{uid}"
+        name = _html.escape(raw_name)
         is_right = letter == correct.upper()
         record_quiz_score(
             group_key, uid, data.get("username"), data.get("firstName"),

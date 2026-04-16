@@ -5,6 +5,7 @@ stages add /doc, /quiz, /stats, /grade, /announce, /purge, /reveal.
 """
 from __future__ import annotations
 
+import html
 from typing import Callable
 
 from bot import github as gh
@@ -235,7 +236,7 @@ def _cmd_model(p: Prepared) -> None:
     if choice not in VALID_MODELS:
         send_message(
             p.user_id,
-            f"Invalid model: <code>{choice}</code>\n"
+            f"Invalid model: <code>{html.escape(choice)}</code>\n"
             f"Valid options: {', '.join(VALID_MODELS)}",
             parse_mode="HTML",
         )
@@ -267,7 +268,7 @@ def _cmd_group(p: Prepared) -> None:
             chat_id = g.get("chatId")
             title = g.get("title", "(untitled)")
             marker = "✅ " if str(chat_id) == str(active) else "   "
-            lines.append(f"{marker}{i}. <code>{chat_id}</code> — {title}")
+            lines.append(f"{marker}{i}. <code>{chat_id}</code> — {html.escape(title)}")
         lines.append("")
         lines.append("Switch: /group &lt;N&gt; or /group &lt;chatId&gt;")
         send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
@@ -283,7 +284,7 @@ def _cmd_group(p: Prepared) -> None:
         target = choice
 
     if target is None:
-        send_message(p.user_id, f"No linked group matches <code>{choice}</code>.", parse_mode="HTML")
+        send_message(p.user_id, f"No linked group matches <code>{html.escape(choice)}</code>.", parse_mode="HTML")
         return
     set_active_group_id(target)
     send_message(p.user_id, f"✅ Active group switched to <code>{target}</code>.", parse_mode="HTML")
@@ -346,7 +347,7 @@ def _cmd_stats(p: Prepared) -> None:
         reverse=True,
     )[:15]
     for _uid, data in by_msgs:
-        name = data.get("firstName") or data.get("username") or "(unknown)"
+        name = html.escape(data.get("firstName") or data.get("username") or "(unknown)")
         lines.append(f"• {name} — {int(data.get('messageCount', 0))}")
 
     # Quiz scores (sorted by accuracy desc).
@@ -359,7 +360,7 @@ def _cmd_stats(p: Prepared) -> None:
             return (int(data.get("correct", 0)) / t) if t else 0.0
         by_acc = sorted(scores_map.items(), key=_accuracy, reverse=True)[:15]
         for _uid, data in by_acc:
-            name = data.get("firstName") or data.get("username") or "(unknown)"
+            name = html.escape(data.get("firstName") or data.get("username") or "(unknown)")
             c, t = int(data.get("correct", 0)), int(data.get("total", 0))
             pct = 100 * c / t if t else 0
             lines.append(f"• {name} — {c}/{t} ({pct:.0f}%)")
@@ -382,7 +383,7 @@ def _cmd_grade(p: Prepared) -> None:
             None,
         )
         if match is None:
-            send_message(p.user_id, f"No data for @{target_username} in <code>{p.group_key}</code>.",
+            send_message(p.user_id, f"No data for @{html.escape(target_username)} in <code>{p.group_key}</code>.",
                          parse_mode="HTML")
             return
         send_message(p.user_id, _render_grade_detail(match), parse_mode="HTML")
@@ -397,7 +398,7 @@ def _cmd_grade(p: Prepared) -> None:
     for e in engagement[:25]:
         flag = " ⚠️" if e.inactive else ""
         lines.append(
-            f"• {e.display_name}{flag} — <b>{e.total_pts:.0f}/100</b>  "
+            f"• {html.escape(e.display_name)}{flag} — <b>{e.total_pts:.0f}/100</b>  "
             f"(msgs {e.messages_pts:.0f} / part {e.particip_pts:.0f} / acc {e.accuracy_pts:.0f})"
         )
     send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
@@ -406,7 +407,7 @@ def _cmd_grade(p: Prepared) -> None:
 def _render_grade_detail(e: "stats_mod.Engagement") -> str:
     flag = " ⚠️ (inactive >7d)" if e.inactive else ""
     return (
-        f"<b>{e.display_name}</b>{flag}\n"
+        f"<b>{html.escape(e.display_name)}</b>{flag}\n"
         f"Total: <b>{e.total_pts:.0f}/100</b>\n"
         f"  • Messages: {e.messages} → {e.messages_pts:.0f}/{stats_mod.W_MESSAGES}\n"
         f"  • Participation: {e.attempts}/{e.total_quizzes} "

@@ -12,6 +12,7 @@ Vercel Blob, embedded into Upstash Vector, and indexed in Redis under
 """
 from __future__ import annotations
 
+import html
 import time
 
 from bot import blob
@@ -67,7 +68,7 @@ def _cmd_list(p: Prepared) -> None:
         slug = d.get("slug", "?")
         chunks = d.get("chunkCount", "?")
         added_by = d.get("addedBy") or "(unknown)"
-        lines.append(f"• <b>{title}</b> — <code>{slug}</code>, {chunks} chunks, by @{added_by}")
+        lines.append(f"• <b>{html.escape(title)}</b> — <code>{html.escape(str(slug))}</code>, {chunks} chunks, by @{html.escape(str(added_by))}")
     send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
 
 
@@ -87,7 +88,7 @@ def _cmd_upsert(p: Prepared, sub: str, title: str, content: str) -> None:
 
     if sub == "update":
         if not existing:
-            send_message(p.user_id, f"No existing doc matches <code>{title}</code>.",
+            send_message(p.user_id, f"No existing doc matches <code>{html.escape(title)}</code>.",
                          parse_mode="HTML")
             return
         _purge_doc(existing)
@@ -130,10 +131,10 @@ def _cmd_upsert(p: Prepared, sub: str, title: str, content: str) -> None:
     verb = "updated" if sub == "update" else "added"
     send_message(
         p.user_id,
-        f"✅ Doc {verb}: <b>{title}</b>\n"
-        f"slug: <code>{slug}</code>\n"
+        f"✅ Doc {verb}: <b>{html.escape(title)}</b>\n"
+        f"slug: <code>{html.escape(slug)}</code>\n"
         f"chunks: {chunk_count}\n"
-        f"blob: {blob_url}",
+        f"blob: {html.escape(blob_url or '')}",
         parse_mode="HTML",
     )
 
@@ -141,13 +142,13 @@ def _cmd_upsert(p: Prepared, sub: str, title: str, content: str) -> None:
 def _cmd_delete(p: Prepared, title: str) -> None:
     existing = _find_existing_by_title(title)
     if not existing:
-        send_message(p.user_id, f"No doc matches <code>{title}</code>.", parse_mode="HTML")
+        send_message(p.user_id, f"No doc matches <code>{html.escape(title)}</code>.", parse_mode="HTML")
         return
     _purge_doc(existing)
     send_message(
         p.user_id,
-        f"✅ Deleted: <b>{existing.get('title')}</b> "
-        f"(<code>{existing.get('slug')}</code>)",
+        f"✅ Deleted: <b>{html.escape(existing.get('title', ''))}</b> "
+        f"(<code>{html.escape(existing.get('slug', ''))}</code>)",
         parse_mode="HTML",
     )
 

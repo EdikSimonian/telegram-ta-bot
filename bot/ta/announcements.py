@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import html
+
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     clear_pending_announcement,
@@ -35,7 +37,7 @@ def start(p: Prepared) -> None:
     send_message(
         p.user_id,
         "📣 <b>Announcement Preview</b>\n\n"
-        f"{text}\n\n"
+        f"{html.escape(text)}\n\n"
         f"Target: <code>{target}</code>\n"
         "Reply <b>send it</b> to post, or <b>cancel</b> to discard.",
         parse_mode="HTML",
@@ -67,7 +69,7 @@ def handle_reply(p: Prepared) -> bool:
             send_message(p.user_id, "Pending announcement was malformed — discarded.")
             return True
         try:
-            send_message(target, f"📣 <b>Announcement</b>\n\n{body}", parse_mode="HTML")
+            send_message(target, f"📣 <b>Announcement</b>\n\n{html.escape(body)}", parse_mode="HTML")
             send_message(p.user_id, f"✅ Posted to <code>{target}</code>.", parse_mode="HTML")
         except Exception as e:
             send_message(p.user_id, f"Failed to post announcement: {e}")

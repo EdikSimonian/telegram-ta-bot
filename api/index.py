@@ -1,3 +1,5 @@
+import hmac
+
 import telebot
 from flask import Flask, request
 import bot.handlers  # registers all handlers with the bot
@@ -19,7 +21,7 @@ def health():
 def webhook():
     if WEBHOOK_SECRET:
         token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if token != WEBHOOK_SECRET:
+        if not hmac.compare_digest(token, WEBHOOK_SECRET):
             return "Forbidden", 403
     notify_once()
     update = telebot.types.Update.de_json(request.get_data(as_text=True))
