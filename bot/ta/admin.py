@@ -14,6 +14,7 @@ from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
     bump_message_count,
     list_groups as _list_groups,
+    mark_dm_welcomed,
     register_group,
     remember_user_chat,
     ta_rate_check_and_inc,
@@ -73,6 +74,10 @@ def route(message) -> None:
         if p.is_dm:
             from bot.clients import bot as _bot
             _bot.send_message(p.chat_id, welcome.DM_WELCOME)
+            # Consume the once-gate so the next non-command DM doesn't
+            # re-send the welcome. /start always sends; the gate only
+            # matters for regular messages.
+            mark_dm_welcomed(p.user_id)
         else:
             from bot.clients import bot as _bot
             _bot.send_message(p.chat_id, welcome.GROUP_WELCOME)

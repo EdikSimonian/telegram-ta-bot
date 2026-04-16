@@ -6,4 +6,4 @@ upstash-vector==0.8.0
 vercel-blob==0.4.2
 requests==2.33.1
 gradio-client==1.7.0
-pytest==9.0.2
+pytest==9.0.3

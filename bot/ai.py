@@ -23,6 +23,7 @@ from bot.config import (
 from bot.ta import guardrail, rag
 from bot.ta.prepare import Prepared, prompt_prefix
 from bot.ta.state import (
+    append_dm_log,
     append_history,
     get_active_model,
     get_history,
@@ -140,6 +141,19 @@ def answer(p: Prepared) -> str | None:
     # 4. Persist — group-level history so the whole class shares context.
     append_history(p.group_key, "user", user_payload, limit=MAX_HISTORY)
     append_history(p.group_key, "assistant", reply, limit=MAX_HISTORY)
+
+    # 4a. DM audit log: a per-user transcript so instructors can /dm view
+    #     a specific student later. Raw user text (no prefix) is friendlier
+    #     to read than user_payload.
+    if p.is_dm:
+        append_dm_log(
+            p.user_id, "user", raw,
+            username=p.username, first_name=p.first_name,
+        )
+        append_dm_log(
+            p.user_id, "assistant", reply,
+            username=p.username, first_name=p.first_name,
+        )
 
     # 4b. In groups: snapshot this Q&A per student so DM follow-ups work.
     if not p.is_dm:

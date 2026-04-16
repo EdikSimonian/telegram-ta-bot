@@ -6,31 +6,37 @@ stages add /doc, /quiz, /stats, /grade, /announce, /purge, /reveal.
 from __future__ import annotations
 
 import html
+import time
 from typing import Callable
 
 from bot import github as gh
 from bot.clients import bot as _bot
-from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS
+from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS, VECTOR_NAMESPACE
 from bot.ta import announcements as ann_mod
 from bot.ta import docs as docs_mod
 from bot.ta import git_ingest as git_mod
 from bot.ta import quiz as quiz_mod
+from bot.ta import rag as rag_mod
 from bot.ta import stats as stats_mod
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     add_admin,
     add_feedback,
     clear_active_model,
+    clear_dm_log,
     clear_feedback,
     clear_history,
     get_active_group_id,
     get_active_model,
+    get_dm_log,
+    get_dm_meta,
     get_group_stats,
     get_quiz_scores,
     get_streak,
     get_total_quizzes,
     get_user_chat,
     list_admins,
+    list_dm_users,
     list_feedback,
     list_groups,
     remove_admin,
@@ -108,6 +114,12 @@ def _cmd_help(p: Prepared) -> None:
         "/git sync — re-sync all repos",
         "/git sync &lt;owner/repo&gt;",
         "/git remove &lt;owner/repo&gt;",
+        "/vstats — vector index stats",
+        "",
+        "<b>DMs</b>",
+        "/dm — list active DM conversations",
+        "/dm view @user|&lt;userId&gt; — show transcript",
+        "/dm clear @user|&lt;userId&gt; — wipe transcript",
         "",
         "<b>Engagement</b>",
         "/quiz [topic] — post an MC question",
@@ -571,6 +583,188 @@ def _cmd_git(p: Prepared) -> None:
         return
 
     send_message(p.user_id, "Usage: /git list | add <repo> | remove <repo> | sync <repo>")
+
+
+# ── /dm list|view|clear ───────────────────────────────────────────────────
+_DM_VIEW_LIMIT = 40          # last N turns rendered per /dm view
+_DM_CHUNK_SIZE = 3500        # safe under Telegram's 4096-char HTML limit
+
+
+def _resolve_dm_target(raw_arg: str) -> str | None:
+    """Accept either @username or a numeric user id. Returns the user id
+    as a string, or None if we can't find a match."""
+    token = raw_arg.strip().lstrip("@").lower()
+    if not token:
+        return None
+    if token.isdigit() or (token.startswith("-") and token[1:].isdigit()):
+        return token
+    chat_id = get_user_chat(token)
+    return str(chat_id) if chat_id else None
+
+
+def _format_dm_turn(turn: dict) -> str:
+    ts = int(turn.get("ts") or 0)
+    role = turn.get("role") or "?"
+    content = html.escape((turn.get("content") or "").strip())
+    when = time.strftime("%m-%d %H:%M", time.gmtime(ts)) if ts else "?"
+    tag = "👤 <b>user</b>" if role == "user" else "🤖 <b>bot</b>"
+    return f"[{when} UTC] {tag}\n{content}"
+
+
+def _send_chunks(chat_id: int | str, header: str, lines: list[str]) -> None:
+    """Send ``header`` + ``lines`` as one or more HTML messages under the
+    Telegram character cap. Splits on turn boundaries, never mid-line."""
+    buf = header
+    for ln in lines:
+        prospective = f"{buf}\n\n{ln}" if buf else ln
+        if len(prospective) > _DM_CHUNK_SIZE and buf:
+            send_message(chat_id, buf, parse_mode="HTML")
+            buf = ln
+        else:
+            buf = prospective
+    if buf:
+        send_message(chat_id, buf, parse_mode="HTML")
+
+
+@_register("dm")
+def _cmd_dm(p: Prepared) -> None:
+    tokens = (p.command_args or "").split()
+    sub = tokens[0].lower() if tokens else ""
+    arg = tokens[1] if len(tokens) > 1 else ""
+
+    if not sub or sub == "list":
+        _dm_cmd_list(p)
+        return
+    if sub == "view":
+        _dm_cmd_view(p, arg)
+        return
+    if sub == "clear":
+        _dm_cmd_clear(p, arg)
+        return
+    send_message(
+        p.user_id,
+        "Usage: /dm [list] | /dm view @user|&lt;userId&gt; | /dm clear @user|&lt;userId&gt;",
+        parse_mode="HTML",
+    )
+
+
+def _dm_cmd_list(p: Prepared) -> None:
+    users = list_dm_users()
+    if not users:
+        send_message(p.user_id, "No DM conversations yet.")
+        return
+    now = int(time.time())
+    lines = [f"<b>Active DMs</b> ({len(users)})"]
+    for u in users:
+        uid       = str(u.get("userId", "?"))
+        uname     = u.get("username") or ""
+        fname     = u.get("firstName") or ""
+        turns     = int(u.get("turns", 0))
+        last      = int(u.get("lastActive") or 0)
+        ago       = _human_ago(now - last) if last else "?"
+        label     = html.escape(fname or uname or f"user:{uid}")
+        handle    = f"@{html.escape(uname)}" if uname else ""
+        lines.append(
+            f"• <b>{label}</b> {handle} — <code>{html.escape(uid)}</code>, "
+            f"{turns} turns, last {ago}"
+        )
+    lines.append("")
+    lines.append("<b>Audit:</b> /dm view @user | /dm view &lt;userId&gt;")
+    send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+
+
+def _dm_cmd_view(p: Prepared, raw_arg: str) -> None:
+    if not raw_arg:
+        send_message(p.user_id, "Usage: /dm view @user or /dm view <userId>")
+        return
+    uid = _resolve_dm_target(raw_arg)
+    if not uid:
+        send_message(
+            p.user_id,
+            f"No user found for <code>{html.escape(raw_arg)}</code>. "
+            f"Try /dm list to see known ids.",
+            parse_mode="HTML",
+        )
+        return
+    turns = get_dm_log(uid, limit=_DM_VIEW_LIMIT)
+    if not turns:
+        send_message(p.user_id, f"No DM transcript for user <code>{html.escape(uid)}</code>.",
+                     parse_mode="HTML")
+        return
+    meta = get_dm_meta(uid) or {}
+    label = meta.get("firstName") or meta.get("username") or f"user:{uid}"
+    handle = f"@{meta.get('username')}" if meta.get("username") else ""
+    header = (
+        f"<b>DM transcript</b> — {html.escape(label)} {html.escape(handle)} "
+        f"(<code>{html.escape(uid)}</code>)\n"
+        f"Showing last {len(turns)} of {int(meta.get('turns', len(turns)))} turns."
+    )
+    _send_chunks(p.user_id, header, [_format_dm_turn(t) for t in turns])
+
+
+def _dm_cmd_clear(p: Prepared, raw_arg: str) -> None:
+    if not raw_arg:
+        send_message(p.user_id, "Usage: /dm clear @user or /dm clear <userId>")
+        return
+    uid = _resolve_dm_target(raw_arg)
+    if not uid:
+        send_message(
+            p.user_id,
+            f"No user found for <code>{html.escape(raw_arg)}</code>.",
+            parse_mode="HTML",
+        )
+        return
+    if clear_dm_log(uid):
+        send_message(p.user_id, f"✅ Cleared DM transcript for <code>{html.escape(uid)}</code>.",
+                     parse_mode="HTML")
+    else:
+        send_message(p.user_id, f"No DM transcript to clear for <code>{html.escape(uid)}</code>.",
+                     parse_mode="HTML")
+
+
+def _human_ago(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+# ── /vstats ───────────────────────────────────────────────────────────────
+@_register("vstats")
+def _cmd_vstats(p: Prepared) -> None:
+    info = rag_mod.index_info()
+    if info is None:
+        send_message(p.user_id, "Vector index not configured or unreachable.")
+        return
+
+    size_mb = info["index_size"] / (1024 * 1024)
+    active_ns = VECTOR_NAMESPACE or "(default)"
+    lines = [
+        "<b>Vector index</b>",
+        f"Total vectors:  <b>{info['vector_count']:,}</b>",
+        f"Pending:        {info['pending_vector_count']:,}",
+        f"Size:           {size_mb:.2f} MB",
+        f"Dimension:      {info['dimension']}",
+        f"Similarity:     <code>{html.escape(str(info['similarity_function']))}</code>",
+        f"Active ns:      <code>{html.escape(active_ns)}</code>",
+    ]
+    namespaces = info.get("namespaces") or {}
+    if namespaces:
+        lines.append("")
+        lines.append("<b>Namespaces</b>")
+        for name, ns in sorted(namespaces.items(), key=lambda kv: -int(kv[1].get("vector_count", 0))):
+            label = name or "(default)"
+            marker = "✅ " if (name or "") == (VECTOR_NAMESPACE or "") else "   "
+            pending = int(ns.get("pending_vector_count", 0))
+            pending_suffix = f" (+{pending:,} pending)" if pending else ""
+            lines.append(
+                f"{marker}<code>{html.escape(label)}</code> — "
+                f"{int(ns.get('vector_count', 0)):,}{pending_suffix}"
+            )
+    send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
 
 
 # ── /purge ────────────────────────────────────────────────────────────────

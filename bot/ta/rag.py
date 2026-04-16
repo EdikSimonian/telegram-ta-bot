@@ -201,6 +201,36 @@ def retrieve(
     return matches
 
 
+def index_info() -> dict | None:
+    """Return raw index stats from Upstash Vector, or None on failure.
+
+    Shape: ``{vector_count, pending_vector_count, index_size, dimension,
+    similarity_function, namespaces: {name: {vector_count, pending_vector_count}}}``.
+    """
+    if vector_index is None:
+        return None
+    try:
+        info = vector_index.info()
+    except Exception as e:
+        print(f"[rag] info error: {e}")
+        return None
+    namespaces = {
+        name: {
+            "vector_count": getattr(ns, "vector_count", 0),
+            "pending_vector_count": getattr(ns, "pending_vector_count", 0),
+        }
+        for name, ns in (getattr(info, "namespaces", {}) or {}).items()
+    }
+    return {
+        "vector_count":         getattr(info, "vector_count", 0),
+        "pending_vector_count": getattr(info, "pending_vector_count", 0),
+        "index_size":           getattr(info, "index_size", 0),
+        "dimension":            getattr(info, "dimension", 0),
+        "similarity_function":  getattr(info, "similarity_function", ""),
+        "namespaces":           namespaces,
+    }
+
+
 def format_context(matches: Iterable[dict]) -> str:
     """Render retrieved chunks as an LLM-friendly context block.
 

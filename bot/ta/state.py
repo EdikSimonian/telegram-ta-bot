@@ -31,6 +31,7 @@ K_GROUPS           = f"{_P}groups"
 K_ACTIVE_GROUP     = f"{_P}activeGroupId"
 K_GROUP_WELCOMED   = f"{_P}groupWelcomed"
 K_DM_WELCOMED      = f"{_P}dmWelcomed"
+K_DM_USERS         = f"{_P}dm:users"
 K_KNOWN_THREADS    = f"{_P}knownThreads"
 K_DOCS             = f"{_P}docs"
 K_GIT_REPOS        = f"{_P}gitrepos"
@@ -39,6 +40,7 @@ K_FEEDBACK          = f"{_P}feedback"
 QUIZ_HISTORY_CAP = 20
 FEEDBACK_CAP = 100
 DM_FOLLOWUP_TTL = 86400  # 24 hours
+DM_LOG_CAP = 200           # per-user DM audit log cap (turns, not pairs)
 
 
 def _k_last_group_qa(user_id: int | str) -> str:
@@ -75,6 +77,14 @@ def _k_quiz_history(group_key: str) -> str:
 
 def _k_streak(group_key: str, user_id: int | str) -> str:
     return f"{_P}group:{group_key}:streak:{user_id}"
+
+
+def _k_dm_log(user_id: int | str) -> str:
+    return f"{_P}dm:log:{user_id}"
+
+
+def _k_dm_meta(user_id: int | str) -> str:
+    return f"{_P}dm:meta:{user_id}"
 
 
 def _k_streak_users(group_key: str) -> str:
@@ -281,6 +291,102 @@ def append_history(group_key: str, role: str, content: str, limit: int = 20) -> 
 
 def clear_history(group_key: str) -> None:
     _safe(lambda: redis.delete(_k_history(group_key)))
+
+
+# ── DM audit log ──────────────────────────────────────────────────────────
+# Per-user log of every turn that happens in a direct message with the bot.
+# This is intentionally separate from ``history``: the main history bucket
+# is keyed by the active group_key (so DMs share it with whichever group is
+# active), which is fine for LLM context but useless for instructor audit.
+def append_dm_log(
+    user_id: int | str,
+    role: str,
+    content: str,
+    *,
+    username: str | None = None,
+    first_name: str | None = None,
+) -> None:
+    if redis is None:
+        return
+    try:
+        payload = json.dumps({
+            "role":    role,
+            "content": content,
+            "ts":      int(time.time()),
+        })
+        log_key  = _k_dm_log(user_id)
+        meta_key = _k_dm_meta(user_id)
+        redis.rpush(log_key, payload)
+        redis.ltrim(log_key, -DM_LOG_CAP, -1)
+        # Meta: upsert username/firstName/lastActive/totalTurns.
+        raw = redis.hget(meta_key, "data")
+        base = {}
+        if raw:
+            try:
+                base = json.loads(raw)
+            except (TypeError, ValueError):
+                base = {}
+        base["userId"]     = str(user_id)
+        base["username"]   = username or base.get("username")
+        base["firstName"]  = first_name or base.get("firstName")
+        base["lastActive"] = int(time.time())
+        base["turns"]      = int(base.get("turns", 0)) + 1
+        redis.hset(meta_key, values={"data": json.dumps(base)})
+        redis.sadd(K_DM_USERS, str(user_id))
+    except Exception as e:
+        print(f"[ta.state] append_dm_log error: {e}")
+
+
+def get_dm_log(user_id: int | str, limit: int = DM_LOG_CAP) -> list[dict]:
+    raw = _safe(
+        lambda: redis.lrange(_k_dm_log(user_id), -limit, -1),
+        default=[],
+    ) or []
+    out: list[dict] = []
+    for item in raw:
+        try:
+            out.append(json.loads(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def get_dm_meta(user_id: int | str) -> dict | None:
+    raw = _safe(lambda: redis.hget(_k_dm_meta(user_id), "data"), default=None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def list_dm_users() -> list[dict]:
+    """Return all users with a DM log, hydrated with meta. Sorted by
+    ``lastActive`` desc so the most recent conversations surface first."""
+    members = _safe(lambda: redis.smembers(K_DM_USERS), default=set()) or set()
+    out: list[dict] = []
+    for uid in members:
+        meta = get_dm_meta(uid) or {"userId": uid}
+        out.append(meta)
+    out.sort(key=lambda m: int(m.get("lastActive", 0)), reverse=True)
+    return out
+
+
+def clear_dm_log(user_id: int | str) -> bool:
+    """Wipe a single user's DM log + meta. Returns True when the user existed."""
+    if redis is None:
+        return False
+    try:
+        uid = str(user_id)
+        existed = bool(redis.sismember(K_DM_USERS, uid))
+        redis.delete(_k_dm_log(uid))
+        redis.delete(_k_dm_meta(uid))
+        redis.srem(K_DM_USERS, uid)
+        return existed
+    except Exception as e:
+        print(f"[ta.state] clear_dm_log error: {e}")
+        return False
 
 
 # ── Stats + scores ────────────────────────────────────────────────────────

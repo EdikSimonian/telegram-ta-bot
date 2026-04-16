@@ -106,6 +106,40 @@ def test_start_in_dm_sends_welcome_text():
         _exit(stack)
 
 
+def test_start_in_dm_rewelcomes_returning_user():
+    """User who was welcomed in a prior session, deleted the chat, and ran
+    /start again must still see the welcome. The send is unconditional."""
+    stack = _patches(welcomed_already=True)   # already in the gate set
+    _enter(stack)
+    try:
+        with patch("bot.clients.bot.send_message") as sm, \
+             patch("bot.ta.admin.mark_dm_welcomed"), \
+             patch("bot.ta.admin._answer_question") as ans:
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, text="/start"))
+            sm.assert_called_once()
+            assert "Teaching Assistant" in sm.call_args.args[1]
+            ans.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_start_in_dm_consumes_the_welcome_gate():
+    """/start in DM must flip mark_dm_welcomed so the next regular message
+    doesn't trigger a second welcome via send_dm_welcome_once."""
+    stack = _patches(welcomed_already=False)
+    _enter(stack)
+    try:
+        with patch("bot.clients.bot.send_message"), \
+             patch("bot.ta.admin.mark_dm_welcomed") as mdw, \
+             patch("bot.ta.admin._answer_question"):
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, text="/start"))
+            mdw.assert_called_once_with(42)
+    finally:
+        _exit(stack)
+
+
 def test_start_in_group_sends_group_welcome_and_deletes_command():
     stack = _patches()
     _enter(stack)

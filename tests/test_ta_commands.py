@@ -52,6 +52,77 @@ def test_info_shows_env_and_group():
         assert "@ediksimonian" in text
 
 
+# ── /vstats ───────────────────────────────────────────────────────────────
+def test_vstats_shows_totals_and_namespaces():
+    info = {
+        "vector_count": 1234,
+        "pending_vector_count": 5,
+        "index_size": 2 * 1024 * 1024,
+        "dimension": 1536,
+        "similarity_function": "COSINE",
+        "namespaces": {
+            "prod": {"vector_count": 1000, "pending_vector_count": 0},
+            "test": {"vector_count": 234,  "pending_vector_count": 5},
+        },
+    }
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.rag_mod.index_info", return_value=info), \
+         patch("bot.ta.commands.VECTOR_NAMESPACE", "prod"):
+        from bot.ta.commands import _cmd_vstats
+        _cmd_vstats(_prepared(command="vstats"))
+        text = sm.call_args.args[1]
+        assert "1,234" in text
+        assert "1536" in text
+        assert "COSINE" in text
+        assert "prod" in text and "test" in text
+        assert "2.00 MB" in text
+
+
+def test_vstats_passes_through_real_shape_from_upstash_info():
+    """rag.index_info() reads from an attr-shaped InfoResult. This test
+    goes through that path with a MagicMock-shaped vector_index so a rename
+    on the Upstash SDK side (vector_count → something else) would surface."""
+    from unittest.mock import MagicMock as _MM
+    ns_prod = _MM(vector_count=900, pending_vector_count=0)
+    ns_test = _MM(vector_count=100, pending_vector_count=2)
+    info_obj = _MM(
+        vector_count=1000,
+        pending_vector_count=2,
+        index_size=5 * 1024 * 1024,
+        dimension=1536,
+        similarity_function="COSINE",
+        namespaces={"prod": ns_prod, "test": ns_test},
+    )
+    fake_index = _MM()
+    fake_index.info.return_value = info_obj
+    with patch("bot.ta.rag.vector_index", fake_index), \
+         patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.VECTOR_NAMESPACE", "test"):
+        from bot.ta.commands import _cmd_vstats
+        _cmd_vstats(_prepared(command="vstats"))
+        text = sm.call_args.args[1]
+        assert "1,000" in text     # total vectors, thousands-separated
+        assert "5.00 MB" in text   # index size
+        assert "1536" in text      # dimension
+        assert "COSINE" in text    # similarity function
+        # Active namespace is "test" — marker sits on its per-namespace row
+        # (format: "✅ <code>test</code> — 100"). The "Active ns:" header row
+        # uses "Active ns:" prefix, so filter on the trailing vector count.
+        test_line = next(
+            ln for ln in text.splitlines()
+            if "<code>test</code>" in ln and "100" in ln
+        )
+        assert "✅" in test_line
+
+
+def test_vstats_unconfigured():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.rag_mod.index_info", return_value=None):
+        from bot.ta.commands import _cmd_vstats
+        _cmd_vstats(_prepared(command="vstats"))
+        assert "not configured" in sm.call_args.args[1].lower()
+
+
 # ── /admin (list) ─────────────────────────────────────────────────────────
 def test_admin_bare_lists_admins():
     with patch("bot.ta.commands.send_message") as sm, \
