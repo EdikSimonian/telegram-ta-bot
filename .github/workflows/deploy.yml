@@ -24,9 +24,7 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ github.ref_name == 'main' && 'production' || 'test' }}
-      url: ${{ secrets.PROD_URL }}
+    environment: ${{ github.ref_name == 'main' && 'production' || 'test' }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
