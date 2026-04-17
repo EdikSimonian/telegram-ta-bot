@@ -1,0 +1,62 @@
+name: AI PR Review
+
+# Posts an OpenAI-generated review comment on PRs opened by the Claude
+# Code self-upgrade routine. Skips hand-written PRs to avoid burning
+# OpenAI credits on every push.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [test, main]
+
+permissions:
+  pull-requests: write
+  contents:      read
+
+jobs:
+  review:
+    # Same-repo only (fork PRs don't get secrets). Narrow to the
+    # routine's output: branch starts with "upgrade/" or the body
+    # carries its signature.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (startsWith(github.head_ref, 'upgrade/') ||
+       contains(github.event.pull_request.body, 'Self-upgrade routine'))
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install OpenAI SDK
+        run: pip install 'openai>=1.40,<2'
+
+      - name: Fetch PR diff + metadata
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          gh pr diff "$PR" > pr.diff
+          gh pr view "$PR" --json title,body,headRefName,author \
+            -q '{title, body, headRefName, author: .author.login}' > pr.json
+          # Bail early if the diff is empty — nothing to review.
+          if [ ! -s pr.diff ]; then
+            echo "Empty diff, skipping review." >&2
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+        id: fetch
+
+      - name: Run OpenAI review
+        if: steps.fetch.outputs.skip != '1'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:   ${{ vars.OPENAI_REVIEW_MODEL || 'gpt-5.4' }}
+        run: python .github/scripts/review_pr.py pr.diff pr.json CLAUDE.md > review.md
+
+      - name: Post review comment
+        if: steps.fetch.outputs.skip != '1'
+        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file review.md
