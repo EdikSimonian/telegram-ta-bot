@@ -48,8 +48,20 @@ def test_info_shows_env_and_group():
         from bot.ta.commands import _cmd_info
         _cmd_info(_prepared(command="info"))
         text = sm.call_args.args[1]
+        assert "<b>Workspace Info</b>" in text
         assert "-100123" in text
         assert "@ediksimonian" in text
+
+
+def test_info_title_is_workspace_info_even_without_active_group():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.get_active_group_id", return_value=None), \
+         patch("bot.ta.commands.get_active_model", return_value=None):
+        from bot.ta.commands import _cmd_info
+        _cmd_info(_prepared(command="info"))
+        text = sm.call_args.args[1]
+        assert "<b>Workspace Info</b>" in text
+        assert "(none)" in text
 
 
 # ── /vstats ───────────────────────────────────────────────────────────────
