@@ -31,13 +31,18 @@ def test_deploy_push_trigger_still_covers_main_and_test():
     assert "branches: [main, test]" in content
 
 
-def test_deploy_uses_input_ref_for_checkout_and_environment():
+def test_deploy_gates_inputs_ref_by_event_name():
     content = _read("deploy.yml")
-    # Both checkouts in the reusable path must honor the caller-supplied ref,
-    # otherwise deploy would build from the default branch when called.
-    assert "ref: ${{ inputs.ref || github.ref }}" in content
-    # Environment selection must key off the deployed branch, not just the push ref.
-    assert "(inputs.ref || github.ref_name) == 'main'" in content
+    # `inputs` is only defined for workflow_call/workflow_dispatch. Referencing
+    # it unconditionally (e.g. `inputs.ref || github.ref`) would risk breaking
+    # push-triggered deploys. Every use must be gated by github.event_name so
+    # the push path stays on github.ref(_name) and never touches inputs.
+    assert "github.event_name == 'workflow_call' && inputs.ref || github.ref_name" in content
+    assert "github.event_name == 'workflow_call' && inputs.ref || github.ref" in content
+    # Guard against regression: no bare `inputs.ref || github.ref` expressions.
+    assert "inputs.ref || github.ref" not in content.replace(
+        "github.event_name == 'workflow_call' && inputs.ref || github.ref", ""
+    )
 
 
 def test_pr_review_invokes_reusable_deploy_on_merge():

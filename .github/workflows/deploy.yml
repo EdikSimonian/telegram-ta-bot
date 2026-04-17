@@ -15,8 +15,11 @@ on:
         required: true
         type: string
 
+# `inputs` is only defined for workflow_call/workflow_dispatch triggers.
+# Gate every reference to it on event_name so push-triggered runs resolve
+# cleanly via `github.ref(_name)` and never touch the inputs context.
 concurrency:
-  group: deploy-${{ inputs.ref || github.ref_name }}
+  group: deploy-${{ github.event_name == 'workflow_call' && inputs.ref || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -27,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.event_name == 'workflow_call' && inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -37,7 +40,7 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    environment: ${{ (inputs.ref || github.ref_name) == 'main' && 'production' || 'test' }}
+    environment: ${{ (github.event_name == 'workflow_call' && inputs.ref || github.ref_name) == 'main' && 'production' || 'test' }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -47,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.event_name == 'workflow_call' && inputs.ref || github.ref }}
 
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
