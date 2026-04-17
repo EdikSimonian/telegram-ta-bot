@@ -66,4 +66,5 @@ jobs:
       - name: Warm /api/health
         env:
           PROD_URL: ${{ secrets.PROD_URL }}
-        run: curl -sS -o /dev/null -w "health: %{http_code}\n" "${PROD_URL%/}/api/health" || true
+        run: |
+          curl -sS -o /dev/null -w 'health %{http_code}\n' "${PROD_URL%/}/api/health" || true
