@@ -13,6 +13,8 @@ real-time queries when RAG has no hits. When TAVILY_API_KEY is unset
 """
 from __future__ import annotations
 
+import re
+
 from bot.clients import ai
 from bot.config import (
     DEFAULT_MODEL,
@@ -44,14 +46,64 @@ def needs_search(text: str) -> bool:
     return any(t in lower for t in SEARCH_TRIGGERS)
 
 
+# Trailer must (a) start at a word boundary on its left edge — preceded by
+# start-of-string, whitespace, or newline, never markdown like ** — and
+# (b) end the string. The lookbehind blocks mid-line matches such as
+# `**SOURCES_USED:** 1` from corrupting the visible reply.
+_TRAILER_RE = re.compile(
+    r"(?<!\S)SOURCES_USED\s*:\s*([^\n]*)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _format_numbered_context(matches: list[dict]) -> str:
+    """Render matches as `[N] Title — chunk` blocks so the model can cite by index.
+
+    Caller must pre-filter empty-chunk matches so source numbers stay
+    aligned with `matches[idx-1]` lookups in the citation step.
+    """
+    blocks = []
+    for idx, m in enumerate(matches, 1):
+        title = ((m.get("title") or "").strip()) or "Untitled"
+        text = (m.get("chunkText") or "").strip()
+        blocks.append(f"[{idx}] {title}\n{text}")
+    return "\n\n---\n\n".join(blocks)
+
+
 def _build_system(context_block: str | None) -> str:
     if not context_block:
         return SYSTEM_PROMPT
     return (
         f"{SYSTEM_PROMPT}\n\n"
-        f"Course context (from indexed docs — cite or paraphrase as needed):\n"
-        f"{context_block}"
+        f"Course context (from indexed docs — cite or paraphrase as needed). "
+        f"Sources are numbered [1], [2], etc.\n\n"
+        f"{context_block}\n\n"
+        f"On the very last line of your reply, write exactly one of:\n"
+        f"  SOURCES_USED: 1,3    (comma-separated numbers you actually drew from)\n"
+        f"  SOURCES_USED: none   (if you answered from your own knowledge)\n"
+        f"This line is machine-parsed and stripped before the user sees it."
     )
+
+
+def _extract_sources_used(reply: str) -> tuple[str, set[int] | None]:
+    """Parse + strip the SOURCES_USED trailer.
+
+    Returns (clean_reply, used_indices). `used_indices` is None if no trailer
+    was emitted, an empty set for `none`, or the parsed integers otherwise.
+    """
+    m = _TRAILER_RE.search(reply)
+    if not m:
+        return reply, None
+    clean = reply[: m.start()].rstrip()
+    payload = m.group(1).strip().lower()
+    if not payload or payload == "none":
+        return clean, set()
+    used: set[int] = set()
+    for tok in payload.split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            used.add(int(tok))
+    return clean, used
 
 
 def _maybe_search_block(question: str, has_rag_hits: bool) -> str | None:
@@ -82,9 +134,10 @@ def answer(p: Prepared) -> str | None:
     if not raw:
         return None
 
-    # 1. RAG retrieval.
-    matches = rag.retrieve(raw)
-    context_block = rag.format_context(matches) if matches else None
+    # 1. RAG retrieval. Filter empty-chunk hits up front so source numbers
+    #    in the prompt line up 1:1 with matches[idx-1] in the citation step.
+    matches = [m for m in rag.retrieve(raw) if (m.get("chunkText") or "").strip()]
+    context_block = _format_numbered_context(matches) if matches else None
 
     # 2. Assemble messages. System first, then prior turns (group-keyed),
     #    then the new user turn (with the spec §5.9 prefix).
@@ -131,7 +184,11 @@ def answer(p: Prepared) -> str | None:
         print(f"[ai] chat error: {e}")
         return None
 
-    # 3b. Guardrail: strip <think> blocks, leading reasoning, drop hedged /
+    # 3b. Pull off the SOURCES_USED trailer before guardrail so it can't
+    #     interfere with IGNORE detection or hedging checks.
+    raw_reply, used_sources = _extract_sources_used(raw_reply)
+
+    # 3c. Guardrail: strip <think> blocks, leading reasoning, drop hedged /
     #     IGNORE / empty replies. Suppressed replies don't persist to history
     #     (we don't want "IGNORE" polluting the context).
     reply = guardrail.clean(raw_reply)
@@ -159,13 +216,19 @@ def answer(p: Prepared) -> str | None:
     if not p.is_dm:
         save_last_group_qa(p.user_id, raw, reply, p.group_key)
 
-    # 5. Append source citations when RAG hit something.
-    if matches:
+    # 5. Append source citations — only for sources the model signalled it
+    #    actually used (via the SOURCES_USED trailer). If the trailer is
+    #    missing (legacy model) or empty, we stay silent rather than cite
+    #    everything the retriever returned.
+    if matches and used_sources:
         seen_urls: set[str] = set()
         sources: list[str] = []
-        for m in matches:
+        for idx in sorted(used_sources):
+            if idx < 1 or idx > len(matches):
+                continue
+            m = matches[idx - 1]
             url = m.get("blobUrl") or ""
-            title = m.get("title") or "doc"
+            title = ((m.get("title") or "").strip()) or "doc"
             if url and url in seen_urls:
                 continue
             if url:
@@ -173,7 +236,8 @@ def answer(p: Prepared) -> str | None:
                 seen_urls.add(url)
             else:
                 sources.append(f"• {title}")
-        reply = f"{reply}\n\n**Sources:**\n" + "\n".join(sources[:5])
+        if sources:
+            reply = f"{reply}\n\n**Sources:**\n" + "\n".join(sources[:5])
 
     # 6. In groups: nudge students to DM for follow-up.
     if not p.is_dm:
