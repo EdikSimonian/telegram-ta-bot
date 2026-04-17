@@ -38,3 +38,73 @@ def test_webhook_skips_validation_when_no_secret():
         from api.index import webhook
         result = webhook()
         assert result == ("OK", 200)
+
+
+# ── /api/notify-admin ─────────────────────────────────────────────────────
+def _notify_request(header_secret: str, body: dict | None):
+    req = MagicMock()
+    req.headers.get.return_value = header_secret
+    req.get_json.return_value = body
+    return req
+
+
+def test_notify_admin_rejects_bad_secret():
+    req = _notify_request("wrong", {"text": "hi"})
+    with patch("api.index.WEBHOOK_SECRET", "correct"), \
+         patch("api.index.request", req):
+        from api.index import notify_admin
+        assert notify_admin() == ("Forbidden", 403)
+
+
+def test_notify_admin_requires_configured_secret():
+    req = _notify_request("anything", {"text": "hi"})
+    with patch("api.index.WEBHOOK_SECRET", ""), \
+         patch("api.index.request", req):
+        from api.index import notify_admin
+        result, status = notify_admin()
+        assert status == 500
+
+
+def test_notify_admin_rejects_empty_text():
+    req = _notify_request("correct", {"text": "   "})
+    with patch("api.index.WEBHOOK_SECRET", "correct"), \
+         patch("api.index.request", req):
+        from api.index import notify_admin
+        result, status = notify_admin()
+        assert status == 400
+
+
+def test_notify_admin_404_when_admin_chat_unknown():
+    req = _notify_request("correct", {"text": "hi"})
+    with patch("api.index.WEBHOOK_SECRET", "correct"), \
+         patch("api.index.request", req), \
+         patch("api.index.get_user_chat", return_value=None):
+        from api.index import notify_admin
+        result, status = notify_admin()
+        assert status == 404
+
+
+def test_notify_admin_sends_message_and_returns_ok():
+    req = _notify_request("correct", {"text": "hello admin", "parse_mode": "HTML"})
+    mock_bot = MagicMock()
+    with patch("api.index.WEBHOOK_SECRET", "correct"), \
+         patch("api.index.request", req), \
+         patch("api.index.get_user_chat", return_value=42), \
+         patch("api.index.bot", mock_bot):
+        from api.index import notify_admin
+        result, status = notify_admin()
+        assert status == 200
+        mock_bot.send_message.assert_called_once_with(42, "hello admin", parse_mode="HTML")
+
+
+def test_notify_admin_surfaces_send_error():
+    req = _notify_request("correct", {"text": "hello"})
+    mock_bot = MagicMock()
+    mock_bot.send_message.side_effect = RuntimeError("telegram 429")
+    with patch("api.index.WEBHOOK_SECRET", "correct"), \
+         patch("api.index.request", req), \
+         patch("api.index.get_user_chat", return_value=42), \
+         patch("api.index.bot", mock_bot):
+        from api.index import notify_admin
+        result, status = notify_admin()
+        assert status == 502

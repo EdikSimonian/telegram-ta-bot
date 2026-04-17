@@ -77,9 +77,13 @@ jobs:
         run: |
           curl -sS -o /dev/null -w 'health %{http_code}\n' "${PROD_URL%/}/api/health" || true
 
-  # DM the instructor via the bot's own Telegram token when the
-  # deployment was skipped (tests failed) or the deploy job errored.
-  # Silent on success. Requires repo secret TELEGRAM_ADMIN_CHAT_ID.
+  # DM the instructor when deploy was skipped (tests failed) or the
+  # deploy job errored. Silent on success. Reuses the bot's own DM
+  # path via POST /api/notify-admin — that endpoint looks up the
+  # admin's chat id from Redis (same lookup deploy_notice.py uses for
+  # the success-path "🚀 deploy live" DM), so no separate chat-id
+  # secret is needed. The POST hits whatever deploy is currently live
+  # (the previous good one, if this run's deploy failed).
   notify:
     needs: [test, deploy]
     if: >-
@@ -88,24 +92,24 @@ jobs:
            needs.deploy.result == 'failure' ||
            needs.deploy.result == 'skipped') }}
     runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'test' }}
     steps:
-      - name: DM admin on failure/skip
+      - name: DM admin via /api/notify-admin
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          ADMIN_CHAT_ID:      ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
-          TEST_RESULT:        ${{ needs.test.result }}
-          DEPLOY_RESULT:      ${{ needs.deploy.result }}
-          REF:                ${{ github.ref_name }}
-          SHA:                ${{ github.sha }}
-          RUN_URL:            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PROD_URL:       ${{ secrets.PROD_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          TEST_RESULT:    ${{ needs.test.result }}
+          DEPLOY_RESULT:  ${{ needs.deploy.result }}
+          REF:            ${{ github.ref_name }}
+          SHA:            ${{ github.sha }}
+          RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -eu
-          if [ -z "${ADMIN_CHAT_ID:-}" ]; then
-            echo "TELEGRAM_ADMIN_CHAT_ID not set; skipping DM." >&2
+          if [ -z "${PROD_URL:-}" ] || [ -z "${WEBHOOK_SECRET:-}" ]; then
+            echo "PROD_URL / WEBHOOK_SECRET missing; skipping DM." >&2
             exit 0
           fi
 
-          # Classify the failure mode for a concise headline.
           if   [ "$DEPLOY_RESULT" = "skipped" ]; then
             status="⏭️ Deploy SKIPPED"
             reason="Tests failed — deploy was not attempted."
@@ -128,12 +132,18 @@ jobs:
           Commit: <code>${short_sha}</code>
           Run: ${RUN_URL}"
 
-          resp=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${ADMIN_CHAT_ID}" \
-            --data-urlencode "text=${message}" \
-            --data-urlencode "parse_mode=HTML" \
-            --data-urlencode "disable_web_page_preview=true")
+          payload=$(python -c '
+          import json, os, sys
+          print(json.dumps({
+              "text":       os.environ["MSG"],
+              "parse_mode": "HTML",
+          }))' MSG="$message")
+
+          resp=$(curl -sS -X POST "${PROD_URL%/}/api/notify-admin" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${WEBHOOK_SECRET}" \
+            --data "$payload")
           case "$resp" in
-            *'"ok":true'*) echo "DM sent." ;;
-            *) echo "DM failed: $resp" ; exit 1 ;;
+            *'"ok":true'*) echo "DM sent: $resp" ;;
+            *) echo "DM request failed: $resp" ; exit 1 ;;
           esac
