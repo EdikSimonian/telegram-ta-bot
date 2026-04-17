@@ -11,16 +11,16 @@ on:
 
 permissions:
   pull-requests: write
-  contents:      read
+  contents:      write    # needed for auto-merge on ✅ verdict
 
 jobs:
   review:
     # Same-repo only (fork PRs don't get secrets). Narrow to the
-    # routine's output: branch starts with "upgrade/" or the body
+    # routine's output: branch under claude/upgrade- or the body
     # carries its signature.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      (startsWith(github.head_ref, 'upgrade/') ||
+      (startsWith(github.head_ref, 'claude/upgrade-') ||
        contains(github.event.pull_request.body, 'Self-upgrade routine'))
     runs-on: ubuntu-latest
     env:
@@ -60,3 +60,21 @@ jobs:
       - name: Post review comment
         if: steps.fetch.outputs.skip != '1'
         run: gh pr comment "${{ github.event.pull_request.number }}" --body-file review.md
+
+      # Auto-merge only when the reviewer explicitly approves. The
+      # reviewer's system prompt pins the verdict line format, so a
+      # fixed-string grep is both strict and readable. ⚠️ and 🛑 leave
+      # the PR open for human review. `--auto` queues the merge if the
+      # base branch has protection rules; falls through to an immediate
+      # merge if not.
+      - name: Auto-merge if verdict is ✅ approve
+        if: steps.fetch.outputs.skip != '1'
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          if grep -Fq '**Verdict:** ✅ approve' review.md; then
+            echo "Verdict approved — merging PR #$PR."
+            gh pr merge "$PR" --squash --delete-branch --auto \
+              || gh pr merge "$PR" --squash --delete-branch
+          else
+            echo "Verdict was not ✅ approve — leaving PR open for manual review."
+          fi
