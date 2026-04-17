@@ -26,6 +26,8 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
 
     steps:
       - uses: actions/checkout@v4
@@ -66,15 +68,36 @@ jobs:
       # fixed-string grep is both strict and readable. ⚠️ and 🛑 leave
       # the PR open for human review. `--auto` queues the merge if the
       # base branch has protection rules; falls through to an immediate
-      # merge if not.
+      # merge if not. Emits `merged=true` on success so the downstream
+      # deploy job can fire — merges via GITHUB_TOKEN do not trigger
+      # push events, so deploy must be invoked explicitly.
       - name: Auto-merge if verdict is ✅ approve
+        id: merge
         if: steps.fetch.outputs.skip != '1'
         run: |
           PR="${{ github.event.pull_request.number }}"
           if grep -Fq '**Verdict:** ✅ approve' review.md; then
             echo "Verdict approved — merging PR #$PR."
-            gh pr merge "$PR" --squash --delete-branch --auto \
-              || gh pr merge "$PR" --squash --delete-branch
+            if gh pr merge "$PR" --squash --delete-branch --auto \
+               || gh pr merge "$PR" --squash --delete-branch; then
+              echo "merged=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "merged=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
           else
             echo "Verdict was not ✅ approve — leaving PR open for manual review."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
           fi
+
+  # Reusable-workflow invocation. Runs only when the review job actually
+  # merged the PR. Targets the PR's base branch (test or main), which
+  # matches the branches deploy.yml's push trigger covers — so direct
+  # pushes and auto-merges now share the same deploy path.
+  deploy:
+    needs: review
+    if: needs.review.outputs.merged == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      ref: ${{ github.event.pull_request.base.ref }}
+    secrets: inherit

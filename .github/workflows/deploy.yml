@@ -1,11 +1,22 @@
 name: Deploy
 
+# Triggers:
+# - push: normal deploy on direct push to main/test
+# - workflow_call: invoked from pr-review.yml after an auto-merge. Needed
+#   because merges performed with GITHUB_TOKEN do not fire push events, so
+#   the auto-merge path would otherwise never reach deploy.
 on:
   push:
     branches: [main, test]
+  workflow_call:
+    inputs:
+      ref:
+        description: "Branch to deploy (main or test)"
+        required: true
+        type: string
 
 concurrency:
-  group: deploy-${{ github.ref_name }}
+  group: deploy-${{ inputs.ref || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -15,6 +26,8 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -24,7 +37,7 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'production' || 'test' }}
+    environment: ${{ (inputs.ref || github.ref_name) == 'main' && 'production' || 'test' }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -33,6 +46,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
