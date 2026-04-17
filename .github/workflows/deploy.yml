@@ -1,0 +1,69 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, test]
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || 'test' }}
+      url: ${{ secrets.PROD_URL }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel project settings
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy to Vercel
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+
+      - name: Register Telegram webhook
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          PROD_URL: ${{ secrets.PROD_URL }}
+        run: |
+          set -eu
+          url="${PROD_URL%/}/api/webhook"
+          allowed='["message","edited_message","my_chat_member"]'
+          if [ -n "${WEBHOOK_SECRET:-}" ]; then
+            resp=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+              --data-urlencode "url=${url}" \
+              --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
+              --data-urlencode "allowed_updates=${allowed}")
+          else
+            resp=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+              --data-urlencode "url=${url}" \
+              --data-urlencode "allowed_updates=${allowed}")
+          fi
+          case "$resp" in
+            *'"ok":true'*) echo "webhook ok -> ${url}" ;;
+            *) echo "webhook FAILED: $resp" ; exit 1 ;;
+          esac
+
+      - name: Warm /api/health
+        env:
+          PROD_URL: ${{ secrets.PROD_URL }}
+        run: curl -sS -o /dev/null -w "health: %{http_code}\n" "${PROD_URL%/}/api/health" || true
