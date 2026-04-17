@@ -154,7 +154,7 @@ def _cmd_info(p: Prepared) -> None:
     group_key = p.group_key
     model = get_active_model(group_key) or DEFAULT_MODEL
     lines = [
-        "<b>Workspace Info</b>",
+        "<b>Workspace</b>",
         f"Environment:   <code>{BOT_ENV}</code>",
         f"Active group:  <code>{active_group}</code>",
         f"Context key:   <code>{group_key}</code>",
