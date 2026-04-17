@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Call OpenAI to review a PR diff; emit the review as markdown.
 
-Invoked from .github/workflows/pr-review.yml. Reads three files passed
+Invoked from .github/workflows/pr-review.yml. Reads four files passed
 on the command line and prints the review to stdout for `gh pr comment`
 to post.
 
-    usage: review_pr.py <diff> <pr.json> <CLAUDE.md>
+    usage: review_pr.py <diff> <pr.json> <CLAUDE.md> <prior_reviews.json>
+
+`prior_reviews.json` is a JSON array of strings — the bodies of every
+previous OpenAI review posted on this PR, oldest first. May be empty.
 
 Required env: OPENAI_API_KEY
 Optional env: OPENAI_MODEL  (defaults to gpt-5.4)
@@ -20,56 +23,73 @@ import sys
 from openai import OpenAI
 
 
-# Token-budget guards. GitHub diffs can get huge; CLAUDE.md is long; we
-# don't need every byte of either to spot issues. Truncation markers are
-# appended inside each blob so the model knows context was cut.
-_MAX_DIFF_CHARS   = 30_000
-_MAX_CLAUDE_CHARS = 6_000
-_MAX_BODY_CHARS   = 4_000
+# Token-budget guards. GitHub diffs get huge, CLAUDE.md is long, prior
+# reviews can stack up across retries. Truncation markers are appended
+# inside each blob so the model knows context was cut.
+_MAX_DIFF_CHARS          = 30_000
+_MAX_CLAUDE_CHARS        = 6_000
+_MAX_BODY_CHARS          = 4_000
+_MAX_PRIOR_REVIEW_CHARS  = 4_000   # per-review cap
+_MAX_PRIOR_REVIEWS_TOTAL = 20_000  # total cap across all prior reviews
 
 
 SYSTEM_PROMPT = """\
 You are a senior code reviewer for a Python Telegram bot deployed on Vercel.
 You review pull requests opened by an automated self-upgrade routine (Claude
-Code). Your job is to catch issues the routine may have missed before the
-maintainer merges.
+Code). Your review is part of a loop: if you request changes, the routine
+gets another attempt (max 5) to address your concerns on the SAME PR branch.
 
-Focus (in this order):
-1. Intent match — does the diff actually accomplish what the PR body says?
-2. Security — command injection, secret leaks, over-broad permissions,
-   missing webhook verification, ReDoS, etc.
-3. Correctness — bugs, off-by-ones, wrong types, missing None-checks at
-   boundaries, unhandled error paths that should be handled.
-4. Test coverage — are the new tests meaningful? Any obvious edge case
-   missing? (Don't demand exhaustive tests; do demand the happy path +
-   one failure path.)
-5. Project conventions — violations of patterns documented in CLAUDE.md.
-6. Size / scope — is the PR doing more than the instruction asked? Call
-   out drive-by refactors or abstractions beyond the task.
+REVIEW RULES — internalise these:
 
-Be concrete. Cite file paths and line ranges from the diff hunks. When
-you suggest a change, show the corrected code.
+(a) Be comprehensive in a SINGLE pass. Flag every issue you see in the
+    current PR state in this one review. Never hold back a concern to
+    raise later. If there are 7 issues, list all 7 now.
 
-Do NOT:
-- Praise the PR or pad with compliments.
-- Restate what the diff does — the maintainer can read it.
-- Raise style-only nits that a linter would catch.
-- Invent issues. If a section has nothing to report, write "None.".
+(b) Prior reviews on this PR (if any) will be provided below. For any
+    concern from a prior review that is STILL present in the current diff,
+    write ONE line: "Still present: <short gist> (see prior review)". Do
+    NOT re-elaborate, re-quote code, or repeat suggested fixes — the
+    routine already has that context. Your prose belongs on NEW issues
+    and on NEWLY-RESOLVED ones ("Resolved: <gist>").
 
-Output format (GitHub-flavored Markdown, nothing else):
+(c) Focus (in this order):
+    1. Intent match — does the diff actually accomplish what the PR body
+       says?
+    2. Security — command injection, secret leaks, over-broad permissions,
+       missing webhook verification, ReDoS, etc.
+    3. Correctness — bugs, off-by-ones, wrong types, missing None-checks
+       at boundaries, unhandled error paths that should be handled.
+    4. Test coverage — are new tests meaningful? Any obvious edge case
+       missing? Demand at least the happy path + one failure path.
+    5. Project conventions — violations of patterns in CLAUDE.md.
+    6. Scope — drive-by refactors or abstractions beyond the task.
+
+(d) Be concrete. Cite file paths and line ranges from the diff hunks.
+    When you suggest a change, show the corrected code.
+
+(e) Do NOT:
+    - Praise the PR or pad with compliments.
+    - Restate what the diff does — the maintainer reads the diff.
+    - Raise style-only nits a linter would catch.
+    - Invent issues. If a section has nothing to report, write "None.".
+
+OUTPUT FORMAT (GitHub-flavored Markdown, nothing else):
 
 ## 🤖 OpenAI review
 
 **Intent match:** <one sentence — does the code match the stated intent?>
 
 **Concerns**
-<bulleted list or "None.">
+<bulleted list, or "None.". Use "Still present: ..." for unresolved prior concerns.>
 
 **Test coverage**
 <bulleted list or "None.">
 
 **Suggestions**
 <bulleted list or "None.">
+
+**Resolved since last review**
+<bulleted list of prior concerns now fixed, or "N/A" if this is the first review.>
 
 **Verdict:** one of ✅ approve / ⚠️ request changes / 🛑 block — with a short reason.
 """
@@ -82,29 +102,63 @@ def _truncate(text: str, limit: int, label: str) -> str:
     return f"{text[:limit]}\n\n[...{label} truncated, {omitted} chars omitted]"
 
 
-def main(diff_path: str, pr_json_path: str, claude_md_path: str) -> None:
-    diff      = _truncate(
+def _format_prior_reviews(reviews: list[str]) -> str:
+    """Render prior reviews for the user prompt, respecting budgets."""
+    if not reviews:
+        return "(none — this is the first review of this PR)"
+
+    rendered: list[str] = []
+    total = 0
+    for i, body in enumerate(reviews, start=1):
+        snippet = _truncate(
+            (body or "").strip(),
+            _MAX_PRIOR_REVIEW_CHARS,
+            f"prior review #{i}",
+        )
+        header = f"### Prior review #{i} (oldest first)\n"
+        block = header + snippet
+        if total + len(block) > _MAX_PRIOR_REVIEWS_TOTAL:
+            rendered.append(f"[...{len(reviews) - i + 1} earlier reviews omitted to stay in budget]")
+            break
+        rendered.append(block)
+        total += len(block)
+    return "\n\n".join(rendered)
+
+
+def main(diff_path: str, pr_json_path: str, claude_md_path: str,
+         prior_reviews_path: str) -> None:
+    diff = _truncate(
         pathlib.Path(diff_path).read_text(errors="replace"),
         _MAX_DIFF_CHARS, "diff",
     )
-    pr        = json.loads(pathlib.Path(pr_json_path).read_text())
+    pr = json.loads(pathlib.Path(pr_json_path).read_text())
     claude_md = _truncate(
         pathlib.Path(claude_md_path).read_text(errors="replace"),
         _MAX_CLAUDE_CHARS, "CLAUDE.md",
     )
-    body      = _truncate(
+    body = _truncate(
         pr.get("body") or "(empty)", _MAX_BODY_CHARS, "PR body",
     )
+
+    prior_reviews = json.loads(
+        pathlib.Path(prior_reviews_path).read_text() or "[]"
+    )
+    if not isinstance(prior_reviews, list):
+        prior_reviews = []
+    prior_reviews_block = _format_prior_reviews(prior_reviews)
 
     user = (
         f"PR title:  {pr.get('title', '')}\n"
         f"Branch:    {pr.get('headRefName', '')}\n"
-        f"Author:    {pr.get('author', '')}\n\n"
+        f"Author:    {pr.get('author', '')}\n"
+        f"Review #:  {len(prior_reviews) + 1} (of up to 6 per PR)\n\n"
         "## PR body\n"
         f"{body}\n\n"
+        "## Prior OpenAI reviews on this PR\n"
+        f"{prior_reviews_block}\n\n"
         "## Project conventions (CLAUDE.md)\n"
         f"{claude_md}\n\n"
-        "## Diff\n"
+        "## Current diff (base..HEAD)\n"
         "```diff\n"
         f"{diff}\n"
         "```\n"
@@ -123,7 +177,10 @@ def main(diff_path: str, pr_json_path: str, claude_md_path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("usage: review_pr.py <diff> <pr.json> <CLAUDE.md>", file=sys.stderr)
+    if len(sys.argv) != 5:
+        print(
+            "usage: review_pr.py <diff> <pr.json> <CLAUDE.md> <prior_reviews.json>",
+            file=sys.stderr,
+        )
         sys.exit(2)
-    main(sys.argv[1], sys.argv[2], sys.argv[3])
+    main(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])

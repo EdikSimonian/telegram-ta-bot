@@ -1,8 +1,13 @@
 name: AI PR Review
 
 # Posts an OpenAI-generated review comment on PRs opened by the Claude
-# Code self-upgrade routine. Skips hand-written PRs to avoid burning
-# OpenAI credits on every push.
+# Code self-upgrade routine, then branches three ways:
+#   - Verdict ✅   → squash-merge the PR and delete branch
+#   - Verdict ⚠️/🛑 with < 5 prior retries → fire the self-upgrade
+#       routine with the review concerns so it can push a fix to the
+#       same PR branch (which re-triggers this workflow).
+#   - Verdict ⚠️/🛑 with ≥ 5 prior retries → post a "giving up"
+#       comment and leave the PR for a human.
 
 on:
   pull_request:
@@ -37,44 +42,163 @@ jobs:
       - name: Install OpenAI SDK
         run: pip install 'openai>=1.40,<2'
 
-      - name: Fetch PR diff + metadata
+      - name: Fetch PR diff + metadata + prior reviews
+        id: fetch
         run: |
+          set -euo pipefail
           PR="${{ github.event.pull_request.number }}"
+
           gh pr diff "$PR" > pr.diff
+
           gh pr view "$PR" --json title,body,headRefName,author \
             -q '{title, body, headRefName, author: .author.login}' > pr.json
+
+          # Every review comment this workflow has previously posted on
+          # the PR, oldest first. Identified by author + signature so
+          # hand-written comments aren't pulled in.
+          gh pr view "$PR" --json comments \
+            -q '[.comments[] | select(.author.login == "github-actions")
+                 | select(.body | startswith("## 🤖 OpenAI review"))
+                 | .body]' \
+            > prior_reviews.json
+
+          prior_count=$(python -c "import json,sys; print(len(json.load(open('prior_reviews.json'))))")
+          echo "prior_count=$prior_count" >> "$GITHUB_OUTPUT"
+
           # Bail early if the diff is empty — nothing to review.
           if [ ! -s pr.diff ]; then
             echo "Empty diff, skipping review." >&2
             echo "skip=1" >> "$GITHUB_OUTPUT"
           fi
-        id: fetch
 
       - name: Run OpenAI review
         if: steps.fetch.outputs.skip != '1'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL:   ${{ vars.OPENAI_REVIEW_MODEL || 'gpt-5.4' }}
-        run: python .github/scripts/review_pr.py pr.diff pr.json CLAUDE.md > review.md
+        run: |
+          python .github/scripts/review_pr.py \
+            pr.diff pr.json CLAUDE.md prior_reviews.json \
+            > review.md
 
       - name: Post review comment
         if: steps.fetch.outputs.skip != '1'
         run: gh pr comment "${{ github.event.pull_request.number }}" --body-file review.md
 
-      # Auto-merge only when the reviewer explicitly approves. The
-      # reviewer's system prompt pins the verdict line format, so a
-      # fixed-string grep is both strict and readable. ⚠️ and 🛑 leave
-      # the PR open for human review. `--auto` queues the merge if the
-      # base branch has protection rules; falls through to an immediate
-      # merge if not.
-      - name: Auto-merge if verdict is ✅ approve
+      # Decision step. Three outcomes, mutually exclusive:
+      #   1. ✅ approve → squash-merge + delete branch
+      #   2. not ✅  & prior_count < 5 → fire routine retry
+      #   3. not ✅  & prior_count >= 5 → stop, post "giving up"
+      # Emits `merged` + `retried` outputs so downstream deploy job and
+      # any future tooling can observe the decision.
+      - name: Decide — merge / retry / give up
+        id: decide
         if: steps.fetch.outputs.skip != '1'
+        env:
+          CLAUDE_ROUTINE_ID:    ${{ secrets.CLAUDE_ROUTINE_ID }}
+          CLAUDE_ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          PR_NUMBER:  ${{ github.event.pull_request.number }}
+          PR_BRANCH:  ${{ github.head_ref }}
+          PR_URL:     ${{ github.event.pull_request.html_url }}
+          PRIOR_COUNT: ${{ steps.fetch.outputs.prior_count }}
         run: |
-          PR="${{ github.event.pull_request.number }}"
+          set -euo pipefail
+
           if grep -Fq '**Verdict:** ✅ approve' review.md; then
-            echo "Verdict approved — merging PR #$PR."
-            gh pr merge "$PR" --squash --delete-branch --auto \
-              || gh pr merge "$PR" --squash --delete-branch
-          else
-            echo "Verdict was not ✅ approve — leaving PR open for manual review."
+            echo "Verdict approved — merging PR #$PR_NUMBER."
+            if gh pr merge "$PR_NUMBER" --squash --delete-branch --auto \
+               || gh pr merge "$PR_NUMBER" --squash --delete-branch; then
+              echo "merged=true"  >> "$GITHUB_OUTPUT"
+              echo "retried=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "merged=false" >> "$GITHUB_OUTPUT"
+              echo "retried=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
           fi
+
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+
+          # PRIOR_COUNT reflects reviews BEFORE the current one. After
+          # the one we just posted, this PR has PRIOR_COUNT+1 reviews.
+          # We cap total routine fires at 5, which means we stop
+          # retrying once PRIOR_COUNT >= 5.
+          if [ "$PRIOR_COUNT" -ge 5 ]; then
+            echo "Max 5 retries reached — not firing routine."
+            gh pr comment "$PR_NUMBER" --body "🛑 **Auto-retry exhausted.** This PR has been reviewed $((PRIOR_COUNT + 1)) times with unresolved concerns. Please address the feedback manually."
+            echo "retried=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${CLAUDE_ROUTINE_ID:-}" ] || [ -z "${CLAUDE_ROUTINE_TOKEN:-}" ]; then
+            echo "CLAUDE_ROUTINE_ID / CLAUDE_ROUTINE_TOKEN secret missing — cannot retry." >&2
+            gh pr comment "$PR_NUMBER" --body "⚠️ Auto-retry could not fire: \`CLAUDE_ROUTINE_ID\` or \`CLAUDE_ROUTINE_TOKEN\` repo secret is missing."
+            echo "retried=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract the original request (between '## Request' and the
+          # next '##' heading) from the PR body so the routine gets the
+          # instructor's intent, not just the review concerns.
+          python - <<'PY' > original_request.txt
+          import json, re
+          body = json.load(open("pr.json")).get("body") or ""
+          m = re.search(r"##\s*Request\s*\n(.*?)(?=\n##\s|\Z)", body, re.DOTALL)
+          print(m.group(1).strip() if m else "(not found in PR body)")
+          PY
+
+          ATTEMPT=$((PRIOR_COUNT + 1))
+          echo "Firing routine — retry attempt $ATTEMPT of 5 for PR #$PR_NUMBER."
+
+          python - <<PY
+          import json, os, pathlib, sys, urllib.request
+
+          review = pathlib.Path("review.md").read_text()
+          original = pathlib.Path("original_request.txt").read_text().strip()
+          text = (
+              "RETRY: address the reviewer's concerns on an existing PR.\n"
+              f"PR_NUMBER: ${PR_NUMBER}\n"
+              f"PR_BRANCH: ${PR_BRANCH}\n"
+              f"PR_URL:    ${PR_URL}\n"
+              f"ATTEMPT:   ${ATTEMPT} of 5\n\n"
+              "## Original instructor request\n"
+              f"{original}\n\n"
+              "## Latest reviewer concerns (address these)\n"
+              f"{review}\n"
+          )
+
+          rid = os.environ["CLAUDE_ROUTINE_ID"]
+          tok = os.environ["CLAUDE_ROUTINE_TOKEN"]
+          req = urllib.request.Request(
+              f"https://api.anthropic.com/v1/claude_code/routines/{rid}/fire",
+              data=json.dumps({"text": text}).encode(),
+              headers={
+                  "Authorization":     f"Bearer {tok}",
+                  "anthropic-beta":    "experimental-cc-routine-2026-04-01",
+                  "anthropic-version": "2023-06-01",
+                  "Content-Type":      "application/json",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  data = json.loads(r.read())
+          except Exception as e:
+              print(f"Routine fire failed: {e}", file=sys.stderr)
+              sys.exit(3)
+          pathlib.Path("session_url.txt").write_text(
+              data.get("claude_code_session_url") or ""
+          )
+          print(data.get("claude_code_session_url") or "(no URL returned)")
+          PY
+
+          SESSION_URL=$(cat session_url.txt 2>/dev/null || echo "")
+          [ -z "$SESSION_URL" ] && SESSION_URL="(unavailable)"
+          gh pr comment "$PR_NUMBER" --body "🔁 **Auto-retry $ATTEMPT/5 triggered.** The self-upgrade routine is addressing the reviewer's concerns on this branch. Session: $SESSION_URL"
+
+          echo "retried=true" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      merged:  ${{ steps.decide.outputs.merged }}
+      retried: ${{ steps.decide.outputs.retried }}
