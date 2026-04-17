@@ -76,3 +76,64 @@ jobs:
           PROD_URL: ${{ secrets.PROD_URL }}
         run: |
           curl -sS -o /dev/null -w 'health %{http_code}\n' "${PROD_URL%/}/api/health" || true
+
+  # DM the instructor via the bot's own Telegram token when the
+  # deployment was skipped (tests failed) or the deploy job errored.
+  # Silent on success. Requires repo secret TELEGRAM_ADMIN_CHAT_ID.
+  notify:
+    needs: [test, deploy]
+    if: >-
+      ${{ always() &&
+          (needs.test.result   == 'failure' ||
+           needs.deploy.result == 'failure' ||
+           needs.deploy.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: DM admin on failure/skip
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ADMIN_CHAT_ID:      ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+          TEST_RESULT:        ${{ needs.test.result }}
+          DEPLOY_RESULT:      ${{ needs.deploy.result }}
+          REF:                ${{ github.ref_name }}
+          SHA:                ${{ github.sha }}
+          RUN_URL:            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          if [ -z "${ADMIN_CHAT_ID:-}" ]; then
+            echo "TELEGRAM_ADMIN_CHAT_ID not set; skipping DM." >&2
+            exit 0
+          fi
+
+          # Classify the failure mode for a concise headline.
+          if   [ "$DEPLOY_RESULT" = "skipped" ]; then
+            status="⏭️ Deploy SKIPPED"
+            reason="Tests failed — deploy was not attempted."
+          elif [ "$DEPLOY_RESULT" = "failure" ]; then
+            status="❌ Deploy FAILED"
+            reason="The deploy step errored (check the run log)."
+          elif [ "$TEST_RESULT" = "failure" ]; then
+            status="❌ Tests FAILED"
+            reason="pytest did not pass."
+          else
+            status="ℹ️ Deploy problem"
+            reason="test=$TEST_RESULT, deploy=$DEPLOY_RESULT"
+          fi
+
+          short_sha="${SHA:0:7}"
+          message="<b>${status}</b> on <code>${REF}</code>
+
+          ${reason}
+
+          Commit: <code>${short_sha}</code>
+          Run: ${RUN_URL}"
+
+          resp=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${ADMIN_CHAT_ID}" \
+            --data-urlencode "text=${message}" \
+            --data-urlencode "parse_mode=HTML" \
+            --data-urlencode "disable_web_page_preview=true")
+          case "$resp" in
+            *'"ok":true'*) echo "DM sent." ;;
+            *) echo "DM failed: $resp" ; exit 1 ;;
+          esac
