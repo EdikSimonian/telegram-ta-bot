@@ -10,6 +10,10 @@ concurrency:
 
 jobs:
   test:
+    # Skip when the head commit was already tested by pr-review.yml —
+    # auto-merge stamps "[pr-tested]" into the squash commit body so
+    # we don't run the same suite twice.
+    if: ${{ !contains(github.event.head_commit.message, '[pr-tested]') }}
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -23,6 +27,9 @@ jobs:
 
   deploy:
     needs: test
+    # Run after `test` succeeds OR when it was skipped (pre-tested by
+    # pr-review.yml). Still blocks on actual test failure.
+    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'production' || 'test' }}
     env:
@@ -69,3 +76,74 @@ jobs:
           PROD_URL: ${{ secrets.PROD_URL }}
         run: |
           curl -sS -o /dev/null -w 'health %{http_code}\n' "${PROD_URL%/}/api/health" || true
+
+  # DM the instructor when deploy was skipped (tests failed) or the
+  # deploy job errored. Silent on success. Reuses the bot's own DM
+  # path via POST /api/notify-admin — that endpoint looks up the
+  # admin's chat id from Redis (same lookup deploy_notice.py uses for
+  # the success-path "🚀 deploy live" DM), so no separate chat-id
+  # secret is needed. The POST hits whatever deploy is currently live
+  # (the previous good one, if this run's deploy failed).
+  notify:
+    needs: [test, deploy]
+    if: >-
+      ${{ always() &&
+          (needs.test.result   == 'failure' ||
+           needs.deploy.result == 'failure' ||
+           needs.deploy.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'test' }}
+    steps:
+      - name: DM admin via /api/notify-admin
+        env:
+          PROD_URL:       ${{ secrets.PROD_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          TEST_RESULT:    ${{ needs.test.result }}
+          DEPLOY_RESULT:  ${{ needs.deploy.result }}
+          REF:            ${{ github.ref_name }}
+          SHA:            ${{ github.sha }}
+          RUN_URL:        ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          if [ -z "${PROD_URL:-}" ] || [ -z "${WEBHOOK_SECRET:-}" ]; then
+            echo "PROD_URL / WEBHOOK_SECRET missing; skipping DM." >&2
+            exit 0
+          fi
+
+          if   [ "$DEPLOY_RESULT" = "skipped" ]; then
+            status="⏭️ Deploy SKIPPED"
+            reason="Tests failed — deploy was not attempted."
+          elif [ "$DEPLOY_RESULT" = "failure" ]; then
+            status="❌ Deploy FAILED"
+            reason="The deploy step errored (check the run log)."
+          elif [ "$TEST_RESULT" = "failure" ]; then
+            status="❌ Tests FAILED"
+            reason="pytest did not pass."
+          else
+            status="ℹ️ Deploy problem"
+            reason="test=$TEST_RESULT, deploy=$DEPLOY_RESULT"
+          fi
+
+          short_sha="${SHA:0:7}"
+          message="<b>${status}</b> on <code>${REF}</code>
+
+          ${reason}
+
+          Commit: <code>${short_sha}</code>
+          Run: ${RUN_URL}"
+
+          payload=$(python -c '
+          import json, os, sys
+          print(json.dumps({
+              "text":       os.environ["MSG"],
+              "parse_mode": "HTML",
+          }))' MSG="$message")
+
+          resp=$(curl -sS -X POST "${PROD_URL%/}/api/notify-admin" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${WEBHOOK_SECRET}" \
+            --data "$payload")
+          case "$resp" in
+            *'"ok":true'*) echo "DM sent: $resp" ;;
+            *) echo "DM request failed: $resp" ; exit 1 ;;
+          esac

@@ -18,6 +18,7 @@ from bot.ta import git_ingest as git_mod
 from bot.ta import quiz as quiz_mod
 from bot.ta import rag as rag_mod
 from bot.ta import stats as stats_mod
+from bot.ta import upgrade as upgrade_mod
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     add_admin,
@@ -139,6 +140,9 @@ def _cmd_help(p: Prepared) -> None:
         "",
         "<b>Cleanup</b>",
         "/purge — bulk delete messages + reset group state",
+        "",
+        "<b>Self-upgrade</b> (instructor only)",
+        "/upgrade &lt;instructions&gt; — fire the Claude Code routine to open a PR",
     ]
     send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
 
@@ -805,6 +809,52 @@ def _cmd_purge(p: Prepared) -> None:
     send_message(
         p.user_id,
         f"✅ Purged {purged} messages and cleared state for <code>{p.group_key}</code>.{extra}",
+        parse_mode="HTML",
+    )
+
+
+# ── /upgrade ──────────────────────────────────────────────────────────────
+@_register("upgrade")
+def _cmd_upgrade(p: Prepared) -> None:
+    """Fire the self-upgrade Claude Code routine. Instructor only.
+
+    The routine is configured in the claude.ai/code/routines UI; it knows
+    which repo to clone, which branch to base off, and how to open the PR.
+    We just hand it the instruction text and report the session URL back.
+    """
+    # Stricter than the normal admin gate: only the permanent admin
+    # (PERMANENT_ADMIN) can modify the codebase remotely.
+    if not p.is_instructor:
+        send_message(
+            p.user_id,
+            f"Only the instructor (@{PERMANENT_ADMIN}) can run /upgrade.",
+        )
+        return
+
+    instructions = (p.command_args or "").strip()
+    if not instructions:
+        send_message(
+            p.user_id,
+            "Usage: <code>/upgrade &lt;instructions&gt;</code>\n"
+            "Example: <code>/upgrade add a /ping command that replies 'pong'</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        result = upgrade_mod.fire(instructions)
+    except upgrade_mod.UpgradeError as e:
+        send_message(p.user_id, f"❌ Could not fire routine: {html.escape(str(e))}",
+                     parse_mode="HTML")
+        return
+
+    send_message(
+        p.user_id,
+        "✅ <b>Upgrade routine triggered.</b>\n"
+        "Claude is now editing the repo, writing tests, and opening a PR.\n\n"
+        f"Session: <a href=\"{html.escape(result.session_url)}\">"
+        f"{html.escape(result.session_id)}</a>\n"
+        "You'll see the PR appear on the <code>test</code> branch when it's done.",
         parse_mode="HTML",
     )
 

@@ -3,6 +3,7 @@
   "rewrites": [
     { "source": "/api/webhook", "destination": "/api/index" },
     { "source": "/api/health", "destination": "/api/index" },
+    { "source": "/api/notify-admin", "destination": "/api/index" },
     { "source": "/api/git-sync-batch", "destination": "/api/git_sync_batch" }
   ],
   "functions": {

@@ -56,6 +56,14 @@ QSTASH_NEXT_SIGNING_KEY    = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "").strip
 # Optional PAT for private repos or to avoid 60-req/hour unauthenticated
 # rate limit. Public repos work without it for typical course volume.
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+
+# ── Claude Code Routine (self-upgrade) ────────────────────────────────────
+# Routine created in the claude.ai/code/routines UI, bound to the
+# EdikSimonian/telegram-ta-bot repo. The /upgrade command (instructor only)
+# fires this routine with the instruction text; the routine edits the code,
+# writes tests, and opens a PR against the test branch.
+CLAUDE_ROUTINE_ID    = os.environ.get("CLAUDE_ROUTINE_ID", "").strip()
+CLAUDE_ROUTINE_TOKEN = os.environ.get("CLAUDE_ROUTINE_TOKEN", "").strip()
 # Shared secret configured on every GitHub webhook that posts to us. The
 # webhook endpoint verifies X-Hub-Signature-256 against this — unsigned
 # requests get 401.

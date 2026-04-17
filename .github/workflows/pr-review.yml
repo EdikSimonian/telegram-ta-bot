@@ -1,0 +1,287 @@
+name: AI PR Review
+
+# Posts an OpenAI-generated review comment on PRs opened by the Claude
+# Code self-upgrade routine AND runs the project's own pytest suite
+# against the PR head. Merge requires BOTH gates to be green:
+#   - Verdict ✅ AND tests pass → squash-merge + delete branch
+#   - Either gate red, retries < 5 → fire the self-upgrade routine with
+#       a RETRY: payload containing the review + test failure output
+#       (if any). Routine pushes a fix to the same branch, which
+#       re-triggers this workflow.
+#   - Either gate red, retries ≥ 5 → post a "giving up" comment and
+#       leave the PR for a human.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [test, main]
+
+permissions:
+  pull-requests: write
+  contents:      write    # needed for auto-merge on ✅ verdict
+
+jobs:
+  review:
+    # Same-repo only (fork PRs don't get secrets). Narrow to the
+    # routine's output: branch under claude/upgrade- or the body
+    # carries its signature.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (startsWith(github.head_ref, 'claude/upgrade-') ||
+       contains(github.event.pull_request.body, 'Self-upgrade routine'))
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install OpenAI SDK
+        run: pip install 'openai>=1.40,<2'
+
+      - name: Fetch PR diff + metadata + prior reviews
+        id: fetch
+        run: |
+          set -euo pipefail
+          PR="${{ github.event.pull_request.number }}"
+
+          gh pr diff "$PR" > pr.diff
+
+          gh pr view "$PR" --json title,body,headRefName,author \
+            -q '{title, body, headRefName, author: .author.login}' > pr.json
+
+          # Every review comment this workflow has previously posted on
+          # the PR, oldest first. Identified by author + signature so
+          # hand-written comments aren't pulled in.
+          gh pr view "$PR" --json comments \
+            -q '[.comments[] | select(.author.login == "github-actions")
+                 | select(.body | startswith("## 🤖 OpenAI review"))
+                 | .body]' \
+            > prior_reviews.json
+
+          prior_count=$(python -c "import json,sys; print(len(json.load(open('prior_reviews.json'))))")
+          echo "prior_count=$prior_count" >> "$GITHUB_OUTPUT"
+
+          # Bail early if the diff is empty — nothing to review.
+          if [ ! -s pr.diff ]; then
+            echo "Empty diff, skipping review." >&2
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run OpenAI review
+        if: steps.fetch.outputs.skip != '1'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL:   ${{ vars.OPENAI_REVIEW_MODEL || 'gpt-5.4' }}
+        run: |
+          python .github/scripts/review_pr.py \
+            pr.diff pr.json CLAUDE.md prior_reviews.json \
+            > review.md
+
+      - name: Post review comment
+        if: steps.fetch.outputs.skip != '1'
+        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file review.md
+
+      # Run the project's own pytest suite against the PR's merge
+      # commit. We tolerate a non-zero exit so the decide step can
+      # handle failure (retry vs give-up) instead of the job aborting
+      # without any further action. Last 80 lines of output are saved
+      # so the retry payload can include them.
+      - name: Run project tests
+        id: tests
+        if: steps.fetch.outputs.skip != '1'
+        run: |
+          set +e
+          pip install -r requirements.txt
+          pytest tests/ --tb=short > test_output.txt 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ pytest: $(tail -1 test_output.txt)"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "❌ pytest failed (exit $rc). Last 80 lines:"
+            tail -80 test_output.txt
+          fi
+
+      # Decision step. Four outcomes, mutually exclusive:
+      #   1. ✅ verdict AND tests pass → squash-merge + delete branch
+      #   2. Either gate red & prior_count < 5 → fire routine retry
+      #      (payload includes test output when tests failed)
+      #   3. Either gate red & prior_count >= 5 → stop, post "giving up"
+      #   4. Secret missing → post warning, no merge, no retry
+      # Emits `merged` + `retried` outputs so downstream deploy job and
+      # any future tooling can observe the decision.
+      - name: Decide — merge / retry / give up
+        id: decide
+        if: steps.fetch.outputs.skip != '1'
+        env:
+          CLAUDE_ROUTINE_ID:    ${{ secrets.CLAUDE_ROUTINE_ID }}
+          CLAUDE_ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          PR_NUMBER:    ${{ github.event.pull_request.number }}
+          PR_BRANCH:    ${{ github.head_ref }}
+          PR_URL:       ${{ github.event.pull_request.html_url }}
+          PRIOR_COUNT:  ${{ steps.fetch.outputs.prior_count }}
+          TESTS_PASSED: ${{ steps.tests.outputs.passed }}
+        run: |
+          set -euo pipefail
+
+          # Determine verdict. Both gates must be green to merge.
+          if grep -Fq '**Verdict:** ✅ approve' review.md; then
+            VERDICT_OK=1
+          else
+            VERDICT_OK=0
+          fi
+          [ "$TESTS_PASSED" = "true" ] && TESTS_OK=1 || TESTS_OK=0
+
+          if [ "$VERDICT_OK" = "1" ] && [ "$TESTS_OK" = "1" ]; then
+            echo "Both gates green — merging PR #$PR_NUMBER."
+            # Stamp the squash-merge commit body with [pr-tested] so
+            # deploy.yml can skip its own pytest run — tests already
+            # passed here as part of the merge gate.
+            SUBJECT="$(gh pr view "$PR_NUMBER" --json title -q .title)"
+            PR_BODY="$(gh pr view "$PR_NUMBER" --json body -q .body)"
+            MERGE_BODY="${PR_BODY}
+
+          [pr-tested] by AI PR Review workflow run ${{ github.run_id }}"
+            if gh pr merge "$PR_NUMBER" --squash --delete-branch --subject "$SUBJECT" --body "$MERGE_BODY" --auto \
+               || gh pr merge "$PR_NUMBER" --squash --delete-branch --subject "$SUBJECT" --body "$MERGE_BODY"; then
+              echo "merged=true"   >> "$GITHUB_OUTPUT"
+              echo "retried=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "merged=false"  >> "$GITHUB_OUTPUT"
+              echo "retried=false" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          fi
+
+          echo "Gate status — verdict_ok=$VERDICT_OK tests_ok=$TESTS_OK. Not merging."
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+
+          # Post a concise PR comment explaining WHY merge didn't happen
+          # so humans skimming the timeline don't have to correlate runs.
+          gate_msg=""
+          [ "$VERDICT_OK" = "0" ] && gate_msg="review: ⚠️/🛑"
+          if [ "$TESTS_OK" = "0" ]; then
+            [ -n "$gate_msg" ] && gate_msg="$gate_msg, "
+            gate_msg="${gate_msg}tests: ❌ failing"
+          fi
+          gh pr comment "$PR_NUMBER" --body "⏸️ **Not merging** ($gate_msg). See the details above; a retry may be triggered below."
+
+          # PRIOR_COUNT reflects reviews BEFORE the current one. After
+          # the one we just posted, this PR has PRIOR_COUNT+1 reviews.
+          # We cap total routine fires at 5, which means we stop
+          # retrying once PRIOR_COUNT >= 5.
+          if [ "$PRIOR_COUNT" -ge 5 ]; then
+            echo "Max 5 retries reached — not firing routine."
+            gh pr comment "$PR_NUMBER" --body "🛑 **Auto-retry exhausted.** This PR has been reviewed $((PRIOR_COUNT + 1)) times with unresolved concerns. Please address the feedback manually."
+            echo "retried=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${CLAUDE_ROUTINE_ID:-}" ] || [ -z "${CLAUDE_ROUTINE_TOKEN:-}" ]; then
+            echo "CLAUDE_ROUTINE_ID / CLAUDE_ROUTINE_TOKEN secret missing — cannot retry." >&2
+            gh pr comment "$PR_NUMBER" --body "⚠️ Auto-retry could not fire: \`CLAUDE_ROUTINE_ID\` or \`CLAUDE_ROUTINE_TOKEN\` repo secret is missing."
+            echo "retried=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract the original request (between '## Request' and the
+          # next '##' heading) from the PR body so the routine gets the
+          # instructor's intent, not just the review concerns.
+          python - <<'PY' > original_request.txt
+          import json, re
+          body = json.load(open("pr.json")).get("body") or ""
+          m = re.search(r"##\s*Request\s*\n(.*?)(?=\n##\s|\Z)", body, re.DOTALL)
+          print(m.group(1).strip() if m else "(not found in PR body)")
+          PY
+
+          ATTEMPT=$((PRIOR_COUNT + 1))
+          echo "Firing routine — retry attempt $ATTEMPT of 5 for PR #$PR_NUMBER."
+
+          python - <<PY
+          import json, os, pathlib, sys, urllib.request
+
+          review = pathlib.Path("review.md").read_text()
+          original = pathlib.Path("original_request.txt").read_text().strip()
+          tests_passed = "${TESTS_PASSED}" == "true"
+
+          # If tests failed in CI, append the last 80 lines so the
+          # routine can diagnose. Cap at ~6KB to stay within budget.
+          test_section = ""
+          if not tests_passed:
+              raw = pathlib.Path("test_output.txt").read_text(errors="replace")
+              # Already tail -80'd in bash step's stdout, but keep the
+              # full file in this step's workspace and trim ourselves.
+              tail = "\n".join(raw.splitlines()[-80:])
+              if len(tail) > 6000:
+                  tail = tail[-6000:]
+              test_section = (
+                  "\n## CI test failures (must be fixed before merge)\n"
+                  "The following pytest failures were observed on this branch in "
+                  "GitHub Actions. Fix the underlying code so `make test` passes "
+                  "both locally and in CI:\n\n"
+                  "```\n"
+                  f"{tail}\n"
+                  "```\n"
+              )
+
+          text = (
+              "RETRY: address the reviewer's concerns on an existing PR.\n"
+              f"PR_NUMBER: ${PR_NUMBER}\n"
+              f"PR_BRANCH: ${PR_BRANCH}\n"
+              f"PR_URL:    ${PR_URL}\n"
+              f"ATTEMPT:   ${ATTEMPT} of 5\n"
+              f"TESTS_PASSED: {str(tests_passed).lower()}\n\n"
+              "## Original instructor request\n"
+              f"{original}\n\n"
+              "## Latest reviewer concerns (address these)\n"
+              f"{review}\n"
+              f"{test_section}"
+          )
+
+          rid = os.environ["CLAUDE_ROUTINE_ID"]
+          tok = os.environ["CLAUDE_ROUTINE_TOKEN"]
+          req = urllib.request.Request(
+              f"https://api.anthropic.com/v1/claude_code/routines/{rid}/fire",
+              data=json.dumps({"text": text}).encode(),
+              headers={
+                  "Authorization":     f"Bearer {tok}",
+                  "anthropic-beta":    "experimental-cc-routine-2026-04-01",
+                  "anthropic-version": "2023-06-01",
+                  "Content-Type":      "application/json",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  data = json.loads(r.read())
+          except Exception as e:
+              print(f"Routine fire failed: {e}", file=sys.stderr)
+              sys.exit(3)
+          pathlib.Path("session_url.txt").write_text(
+              data.get("claude_code_session_url") or ""
+          )
+          print(data.get("claude_code_session_url") or "(no URL returned)")
+          PY
+
+          SESSION_URL=$(cat session_url.txt 2>/dev/null || echo "")
+          [ -z "$SESSION_URL" ] && SESSION_URL="(unavailable)"
+
+          test_line=""
+          [ "$TESTS_OK" = "0" ] && test_line=" Test failures were included in the payload."
+
+          gh pr comment "$PR_NUMBER" --body "🔁 **Auto-retry $ATTEMPT/5 triggered.** The self-upgrade routine is addressing the reviewer's concerns on this branch.$test_line Session: $SESSION_URL"
+
+          echo "retried=true" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      merged:  ${{ steps.decide.outputs.merged }}
+      retried: ${{ steps.decide.outputs.retried }}
