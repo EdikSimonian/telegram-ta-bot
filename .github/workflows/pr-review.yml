@@ -142,8 +142,16 @@ jobs:
 
           if [ "$VERDICT_OK" = "1" ] && [ "$TESTS_OK" = "1" ]; then
             echo "Both gates green — merging PR #$PR_NUMBER."
-            if gh pr merge "$PR_NUMBER" --squash --delete-branch --auto \
-               || gh pr merge "$PR_NUMBER" --squash --delete-branch; then
+            # Stamp the squash-merge commit body with [pr-tested] so
+            # deploy.yml can skip its own pytest run — tests already
+            # passed here as part of the merge gate.
+            SUBJECT="$(gh pr view "$PR_NUMBER" --json title -q .title)"
+            PR_BODY="$(gh pr view "$PR_NUMBER" --json body -q .body)"
+            MERGE_BODY="${PR_BODY}
+
+          [pr-tested] by AI PR Review workflow run ${{ github.run_id }}"
+            if gh pr merge "$PR_NUMBER" --squash --delete-branch --subject "$SUBJECT" --body "$MERGE_BODY" --auto \
+               || gh pr merge "$PR_NUMBER" --squash --delete-branch --subject "$SUBJECT" --body "$MERGE_BODY"; then
               echo "merged=true"   >> "$GITHUB_OUTPUT"
               echo "retried=false" >> "$GITHUB_OUTPUT"
               exit 0
