@@ -28,6 +28,20 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
+      # Constrain the reusable-workflow surface. workflow_call accepts any
+      # string ref; refuse anything other than main/test so a future caller
+      # can't accidentally deploy a feature branch into the test environment.
+      # deploy depends on test, so a failure here also blocks the deploy job.
+      - name: Validate workflow_call ref
+        if: ${{ github.event_name == 'workflow_call' }}
+        run: |
+          case "${{ inputs.ref }}" in
+            main|test) ;;
+            *)
+              echo "Unsupported ref: ${{ inputs.ref }}. Expected main or test." >&2
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_call' && inputs.ref || github.ref }}
