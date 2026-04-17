@@ -6,6 +6,13 @@ on:
 
 jobs:
   test:
+    # Skip for routine-authored PRs — pr-review.yml already runs pytest
+    # against their merge commit and decides merge based on that. Running
+    # the same suite here would just double the CI time and confuse the
+    # gating story.
+    if: >-
+      !(startsWith(github.head_ref, 'claude/upgrade-') ||
+        contains(github.event.pull_request.body, 'Self-upgrade routine'))
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
