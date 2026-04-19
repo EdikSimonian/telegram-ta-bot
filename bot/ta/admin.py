@@ -30,8 +30,11 @@ def _bookkeep(p: Prepared) -> None:
     # Learn user → chat id mapping so /admin add can DM new TAs.
     remember_user_chat(p.username, p.user_id)
     if not p.is_dm and p.user_id:
-        # Track participation.
-        bump_message_count(p.group_key, p.user_id, p.username, p.first_name)
+        # /joke only counts on success; the success path inside _handle_joke
+        # bumps the count itself. Skipping here avoids crediting invalid
+        # usage, rate-limited attempts, or LLM failures.
+        if not (p.is_command and p.command == "joke"):
+            bump_message_count(p.group_key, p.user_id, p.username, p.first_name)
         # Fallback auto-register for groups the bot is already in when the
         # webhook was first registered: my_chat_member only fires for NEW
         # joins, so pre-existing memberships would otherwise stay invisible
@@ -124,9 +127,9 @@ def route(message) -> None:
     #     to the source chat (groups too) so everyone sees the joke, and the
     #     command message is NOT deleted. Rate limit applies to students in
     #     groups just like a regular question so /joke can't be spammed.
-    #     Message-count tracking is handled by _bookkeep above (which runs
-    #     for every inbound group message), so /joke participation is
-    #     counted without a duplicate bump inside _handle_joke.
+    #     Message-count tracking is handled on the success path inside
+    #     _handle_joke — invalid usage, rate-limited attempts, and LLM
+    #     failures must not credit the user.
     if p.is_command and p.command == "joke":
         _handle_joke(p)
         return
@@ -259,3 +262,7 @@ def _handle_joke(p: Prepared) -> None:
         send_message(p.chat_id, "Couldn't come up with a joke right now. Try again?")
         return
     send_reply(p.message, text)
+    # Success path: only now credit the user toward group participation so
+    # failed/invalid/rate-limited /joke attempts don't inflate analytics.
+    if not p.is_dm and p.user_id:
+        bump_message_count(p.group_key, p.user_id, p.username, p.first_name)

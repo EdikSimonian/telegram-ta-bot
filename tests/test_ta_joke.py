@@ -341,11 +341,10 @@ def test_joke_command_addressed_to_this_bot_still_fires():
 
 
 def test_joke_command_in_group_bumps_message_count():
-    """Successful /joke in a group must count toward shared TA state just
-    like any other student interaction so analytics and moderation stay
-    accurate. Tracking happens in _bookkeep (which runs for every message
-    before routing), not inside _handle_joke — duplicating the call here
-    would double-count."""
+    """Successful /joke in a group must count toward shared TA state. The
+    bump happens on the success path inside _handle_joke (after the reply
+    is sent), NOT in the generic _bookkeep, so failed or invalid attempts
+    don't inflate analytics."""
     stack = _router_patches()
     _enter(stack)
     try:
@@ -365,8 +364,8 @@ def test_joke_command_in_group_bumps_message_count():
 
 
 def test_joke_command_in_dm_does_not_bump_message_count():
-    """DMs are not part of group analytics, so _bookkeep skips them and
-    /joke in a DM must not bump any group's message count."""
+    """DMs are not part of group analytics, so /joke in a DM must not bump
+    any group's message count."""
     stack = _router_patches()
     _enter(stack)
     try:
@@ -376,6 +375,78 @@ def test_joke_command_in_dm_does_not_bump_message_count():
             from bot.ta.admin import route
             route(_msg(chat_type="private", chat_id=42, username="student",
                        text="/joke about python"))
+            bmc.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_joke_command_without_theme_does_not_bump_message_count():
+    """Invalid usage (no theme) must NOT count toward participation —
+    only successfully handled /joke interactions credit the user."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.bump_message_count") as bmc, \
+             patch("bot.ta.admin.joke.generate") as gen, \
+             patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.send_reply"):
+            from bot.ta.admin import route
+            route(_msg(username="student", text="/joke"))
+            gen.assert_not_called()
+            bmc.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_joke_command_rate_limited_does_not_bump_message_count():
+    """Rate-limited /joke attempts must NOT bump the shared message count —
+    the user never got a successful interaction."""
+    stack = _router_patches(rate_allowed=False)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.bump_message_count") as bmc, \
+             patch("bot.ta.admin.joke.generate") as gen, \
+             patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.send_reply"):
+            from bot.ta.admin import route
+            route(_msg(username="student", text="/joke about python"))
+            gen.assert_not_called()
+            bmc.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_joke_command_llm_failure_does_not_bump_message_count():
+    """If the LLM fails to produce a joke, the user sees a friendly error
+    but the message count must NOT be incremented."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.bump_message_count") as bmc, \
+             patch("bot.ta.admin.joke.generate", return_value=None), \
+             patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.send_reply") as sr:
+            from bot.ta.admin import route
+            route(_msg(username="student", text="/joke about python"))
+            sr.assert_not_called()
+            bmc.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_joke_command_llm_exception_does_not_bump_message_count():
+    """If joke.generate() raises, the error is caught and a friendly
+    message sent — but the message count must NOT be incremented."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.bump_message_count") as bmc, \
+             patch("bot.ta.admin.joke.generate", side_effect=RuntimeError("boom")), \
+             patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.send_reply") as sr:
+            from bot.ta.admin import route
+            route(_msg(username="student", text="/joke about python"))
+            sr.assert_not_called()
             bmc.assert_not_called()
     finally:
         _exit(stack)
