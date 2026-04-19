@@ -9,7 +9,7 @@ import traceback
 
 from bot.clients import bot
 from bot.config import TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
-from bot.ta import announcements, commands, quiz, welcome
+from bot.ta import announcements, commands, joke, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
     bump_message_count,
@@ -118,6 +118,14 @@ def route(message) -> None:
                 send_message(p.user_id, "\u2705 Feedback received. Thank you!")
         return
 
+    # 3c. /joke is open to ALL users. Unlike /feedback, the reply is posted
+    #     to the source chat (groups too) so everyone sees the joke, and the
+    #     command message is NOT deleted. Rate limit applies to students in
+    #     groups just like a regular question so /joke can't be spammed.
+    if p.is_command and p.command == "joke":
+        _handle_joke(p)
+        return
+
     # 4. Admin + command.
     if p.is_admin and p.is_command:
         if not p.is_dm:
@@ -208,3 +216,45 @@ def _answer_question(p: Prepared) -> None:
         traceback.print_exc()
         if addressed:
             bot.send_message(p.chat_id, "Something went wrong. Please try again.")
+
+
+def _handle_joke(p: Prepared) -> None:
+    """Generate a joke for the given theme and post it to the source chat."""
+    from bot.config import DEFAULT_MODEL
+    from bot.helpers import keep_typing, send_reply
+    from bot.ta.state import get_active_model
+
+    theme = (p.command_args or "").strip()
+    if not theme:
+        send_message(
+            p.chat_id,
+            "Usage: /joke <theme>\nExamples: /joke about python, /joke someone coming late",
+        )
+        return
+
+    if _should_rate_limit(p):
+        allowed, _remaining = ta_rate_check_and_inc(
+            p.user_id, TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
+        )
+        if not allowed:
+            if ta_rate_should_notify(p.user_id):
+                send_message(
+                    p.chat_id,
+                    f"\u26A0\uFE0F You've hit the rate limit of {TA_RATE_LIMIT} "
+                    f"questions per hour. Try again later.",
+                )
+            return
+
+    model = get_active_model(p.group_key) or DEFAULT_MODEL
+    try:
+        with keep_typing(p.chat_id):
+            text = joke.generate(theme, model=model)
+    except Exception as e:
+        print(f"[ta.admin] _handle_joke error: {e}")
+        traceback.print_exc()
+        text = None
+
+    if not text:
+        send_message(p.chat_id, "Couldn't come up with a joke right now. Try again?")
+        return
+    send_reply(p.message, text)
