@@ -131,3 +131,15 @@ def test_generate_joke_returns_none_when_content_is_none():
         ai_mock.chat.completions.create.return_value = _mock_ai_reply(None)
         from bot.ta.jokes import generate_joke
         assert generate_joke("python") is None
+
+
+def test_generate_joke_none_group_key_falls_back_to_default():
+    """Explicit group_key=None must not crash get_active_model — it
+    normalizes to 'default' so the active-model lookup still works."""
+    with patch("bot.ta.jokes.ai") as ai_mock, \
+         patch("bot.ta.jokes.get_active_model", return_value=None) as gam:
+        ai_mock.chat.completions.create.return_value = _mock_ai_reply("joke")
+        from bot.ta.jokes import generate_joke
+        out = generate_joke("coffee", group_key=None)
+        assert out == "joke"
+        gam.assert_called_once_with("default")

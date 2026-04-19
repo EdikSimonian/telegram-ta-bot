@@ -9,6 +9,7 @@ import traceback
 
 from bot.clients import bot
 from bot.config import TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
+from bot.helpers import keep_typing
 from bot.ta import announcements, commands, jokes, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
@@ -17,6 +18,7 @@ from bot.ta.state import (
     mark_dm_welcomed,
     register_group,
     remember_user_chat,
+    resolve_group_key,
     ta_rate_check_and_inc,
     ta_rate_should_notify,
 )
@@ -124,12 +126,12 @@ def route(message) -> None:
     #     visible so the chat sees the setup before the punchline.
     if p.is_command and p.command == "joke":
         theme = (p.command_args or "").strip()
-        # Wrap in keep_typing so slow providers (HF cold start, Cerebras
-        # spike) don't look like the bot has hung — same UX as the LLM
-        # Q&A path in _answer_question.
-        from bot.helpers import keep_typing
+        # Resolve explicitly here so the DM → active-group (or "default")
+        # model-selection contract is visible at the router and testable
+        # without relying on Prepared.group_key being pre-resolved.
+        model_group_key = resolve_group_key(p.chat_type, p.chat_id)
         with keep_typing(p.chat_id):
-            joke_text = jokes.generate_joke(theme, p.group_key)
+            joke_text = jokes.generate_joke(theme, model_group_key)
         if joke_text:
             send_message(p.chat_id, joke_text)
         else:

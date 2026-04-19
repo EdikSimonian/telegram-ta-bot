@@ -23,7 +23,7 @@ _SYSTEM_PROMPT = (
 )
 
 
-def generate_joke(theme: str, group_key: str = "default") -> str | None:
+def generate_joke(theme: str, group_key: str | None = "default") -> str | None:
     """Ask the LLM for a short, clean joke on ``theme``.
 
     Returns the joke text, or ``None`` if the LLM call failed or returned
@@ -31,6 +31,8 @@ def generate_joke(theme: str, group_key: str = "default") -> str | None:
     ``bot/ai.py``: the router always resolves it via ``resolve_group_key``
     (which returns the active group id or ``"default"`` for DMs), so an
     instructor-set ``/model`` override applies to ``/joke`` from DMs too.
+    ``None`` is accepted defensively and normalized to ``"default"`` so a
+    caller passing unresolved state can't crash the lookup.
     """
     theme = (theme or "").strip()[:MAX_THEME_LEN]
     if theme:
@@ -38,7 +40,8 @@ def generate_joke(theme: str, group_key: str = "default") -> str | None:
     else:
         user_prompt = "Tell me one short, clean, family-friendly joke."
 
-    model = get_active_model(group_key) or DEFAULT_MODEL
+    effective_group_key = group_key or "default"
+    model = get_active_model(effective_group_key) or DEFAULT_MODEL
     try:
         resp = ai.chat.completions.create(
             model=model,

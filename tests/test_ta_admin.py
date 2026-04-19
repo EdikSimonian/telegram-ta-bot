@@ -505,6 +505,26 @@ def test_joke_in_dm_forwards_resolved_group_key_for_model_selection():
         _exit(stack)
 
 
+def test_joke_router_calls_resolve_group_key_explicitly():
+    """The router itself must invoke resolve_group_key for /joke so the
+    DM → active-group / 'default' resolution contract is visible at the
+    router level and not hidden inside Prepared construction."""
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="haha") as gj, \
+             patch("bot.ta.admin.resolve_group_key", return_value="-100777") as rgk:
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke about coffee"))
+            rgk.assert_called_with("private", 42)
+            # And the resolved value is what got forwarded, not p.group_key.
+            assert gj.call_args.args[1] == "-100777"
+    finally:
+        _exit(stack)
+
+
 def test_joke_in_dm_falls_back_to_default_group_key_when_no_active_group():
     """No active instructor group set → resolve_group_key returns 'default'
     in DMs. The router must still forward that key so the joke generator can
