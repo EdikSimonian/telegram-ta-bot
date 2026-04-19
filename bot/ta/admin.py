@@ -8,11 +8,13 @@ from __future__ import annotations
 import traceback
 
 from bot.clients import bot
-from bot.config import TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
+from bot.config import DEFAULT_MODEL, TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
+from bot.helpers import keep_typing, send_reply
 from bot.ta import announcements, commands, joke, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
     bump_message_count,
+    get_active_model,
     list_groups as _list_groups,
     mark_dm_welcomed,
     register_group,
@@ -220,10 +222,6 @@ def _answer_question(p: Prepared) -> None:
 
 def _handle_joke(p: Prepared) -> None:
     """Generate a joke for the given theme and post it to the source chat."""
-    from bot.config import DEFAULT_MODEL
-    from bot.helpers import keep_typing, send_reply
-    from bot.ta.state import get_active_model
-
     theme = (p.command_args or "").strip()
     if not theme:
         send_message(

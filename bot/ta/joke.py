@@ -45,7 +45,11 @@ def generate(theme: str, model: str | None = None) -> str | None:
             model=model or DEFAULT_MODEL,
             messages=messages,
         )
-        reply = (resp.choices[0].message.content or "").strip()
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return None
+        message = getattr(choices[0], "message", None)
+        reply = (getattr(message, "content", None) or "").strip()
     except Exception as e:
         print(f"[ta.joke] LLM error: {e}")
         return None

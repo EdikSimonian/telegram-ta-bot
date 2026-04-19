@@ -66,6 +66,46 @@ def test_generate_returns_none_on_blank_llm_reply():
         assert generate("python") is None
 
 
+def test_generate_returns_none_on_empty_choices():
+    # Malformed provider response: choices list is empty.
+    resp = MagicMock()
+    resp.choices = []
+    client = MagicMock()
+    client.chat.completions.create.return_value = resp
+    with patch("bot.ta.joke.ai", client):
+        from bot.ta.joke import generate
+        assert generate("python") is None
+
+
+def test_generate_returns_none_when_message_is_none():
+    # Malformed provider response: first choice has message=None.
+    resp = MagicMock()
+    resp.choices = [MagicMock(message=None)]
+    client = MagicMock()
+    client.chat.completions.create.return_value = resp
+    with patch("bot.ta.joke.ai", client):
+        from bot.ta.joke import generate
+        assert generate("python") is None
+
+
+def test_generate_returns_none_when_content_is_none():
+    # Malformed provider response: message.content is None.
+    client = _ai_returning(None)
+    with patch("bot.ta.joke.ai", client):
+        from bot.ta.joke import generate
+        assert generate("python") is None
+
+
+def test_generate_returns_none_when_choices_attr_missing():
+    # Provider object doesn't expose .choices at all.
+    resp = object()
+    client = MagicMock()
+    client.chat.completions.create.return_value = resp
+    with patch("bot.ta.joke.ai", client):
+        from bot.ta.joke import generate
+        assert generate("python") is None
+
+
 def test_generate_defaults_to_default_model_when_unset():
     client = _ai_returning("joke")
     with patch("bot.ta.joke.ai", client), \
@@ -136,7 +176,7 @@ def test_joke_command_in_group_generates_and_posts_reply():
         with patch("bot.ta.admin.joke.generate", return_value="ha ha") as gen, \
              patch("bot.ta.admin.delete_message") as d, \
              patch("bot.ta.admin.send_message") as sm, \
-             patch("bot.helpers.send_reply") as sr:
+             patch("bot.ta.admin.send_reply") as sr:
             from bot.ta.admin import route
             route(_msg(username="student", text="/joke about python"))
             gen.assert_called_once()
@@ -158,7 +198,7 @@ def test_joke_command_in_dm_generates_and_posts_reply():
     _enter(stack)
     try:
         with patch("bot.ta.admin.joke.generate", return_value="lol") as gen, \
-             patch("bot.helpers.send_reply") as sr, \
+             patch("bot.ta.admin.send_reply") as sr, \
              patch("bot.ta.admin._answer_question") as ans:
             from bot.ta.admin import route
             route(_msg(chat_type="private", chat_id=42, username="student",
@@ -177,7 +217,7 @@ def test_joke_command_without_theme_shows_usage():
     try:
         with patch("bot.ta.admin.joke.generate") as gen, \
              patch("bot.ta.admin.send_message") as sm, \
-             patch("bot.helpers.send_reply") as sr:
+             patch("bot.ta.admin.send_reply") as sr:
             from bot.ta.admin import route
             route(_msg(username="student", text="/joke"))
             gen.assert_not_called()
@@ -196,7 +236,7 @@ def test_joke_command_works_for_admins_too():
     try:
         with patch("bot.ta.admin.joke.generate", return_value="ha") as gen, \
              patch("bot.ta.admin.commands.dispatch") as disp, \
-             patch("bot.helpers.send_reply"):
+             patch("bot.ta.admin.send_reply"):
             from bot.ta.admin import route
             route(_msg(username="alice", text="/joke about git"))
             gen.assert_called_once()
@@ -211,7 +251,7 @@ def test_joke_command_rate_limited_student_in_group_is_blocked():
     try:
         with patch("bot.ta.admin.joke.generate") as gen, \
              patch("bot.ta.admin.send_message") as sm, \
-             patch("bot.helpers.send_reply") as sr:
+             patch("bot.ta.admin.send_reply") as sr:
             from bot.ta.admin import route
             route(_msg(username="student", text="/joke about python"))
             gen.assert_not_called()
@@ -229,7 +269,7 @@ def test_joke_command_rate_limit_skipped_for_admins():
     try:
         with patch("bot.ta.admin.joke.generate", return_value="ha") as gen, \
              patch("bot.ta.admin.ta_rate_check_and_inc") as rc, \
-             patch("bot.helpers.send_reply") as sr:
+             patch("bot.ta.admin.send_reply") as sr:
             from bot.ta.admin import route
             route(_msg(username="alice", text="/joke about git"))
             # Admins bypass the rate limit entirely — the check must not run
@@ -247,12 +287,54 @@ def test_joke_command_rate_limit_skipped_in_dm():
     try:
         with patch("bot.ta.admin.joke.generate", return_value="ha") as gen, \
              patch("bot.ta.admin.ta_rate_check_and_inc") as rc, \
-             patch("bot.helpers.send_reply") as sr:
+             patch("bot.ta.admin.send_reply") as sr:
             from bot.ta.admin import route
             route(_msg(chat_type="private", chat_id=42, username="student",
                        text="/joke about python"))
             rc.assert_not_called()
             gen.assert_called_once()
+            sr.assert_called_once()
+    finally:
+        _exit(stack)
+
+
+def test_joke_command_addressed_to_other_bot_does_not_fire_in_group():
+    """/joke@OtherBot must NOT run the joke handler in a group — prepare.py
+    already filters off-target commands by returning is_command=False, so the
+    short-circuit never fires and generate() is never called."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.joke.generate") as gen, \
+             patch("bot.ta.admin.send_message") as sm, \
+             patch("bot.ta.admin.send_reply") as sr, \
+             patch("bot.ta.admin._answer_question") as ans:
+            from bot.ta.admin import route
+            # BOT_INFO.username is "testbot" (set in conftest); target "OtherBot"
+            # doesn't match, so _parse_command returns is_command=False.
+            route(_msg(username="student", text="/joke@OtherBot about python"))
+            gen.assert_not_called()
+            sr.assert_not_called()
+            # Usage help must not be sent either — the message was not a
+            # /joke command as far as this bot is concerned.
+            for call in sm.call_args_list:
+                assert "Usage" not in call.args[1]
+    finally:
+        _exit(stack)
+
+
+def test_joke_command_addressed_to_this_bot_still_fires():
+    """/joke@testbot about python — the explicit target matches our bot, so
+    the joke handler must still run."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.joke.generate", return_value="ha") as gen, \
+             patch("bot.ta.admin.send_reply") as sr:
+            from bot.ta.admin import route
+            route(_msg(username="student", text="/joke@testbot about python"))
+            gen.assert_called_once()
+            assert gen.call_args.args[0] == "about python"
             sr.assert_called_once()
     finally:
         _exit(stack)
@@ -264,7 +346,7 @@ def test_joke_command_handles_llm_failure_gracefully():
     try:
         with patch("bot.ta.admin.joke.generate", return_value=None) as gen, \
              patch("bot.ta.admin.send_message") as sm, \
-             patch("bot.helpers.send_reply") as sr:
+             patch("bot.ta.admin.send_reply") as sr:
             from bot.ta.admin import route
             route(_msg(username="student", text="/joke about python"))
             gen.assert_called_once()
