@@ -505,22 +505,53 @@ def test_joke_in_dm_forwards_resolved_group_key_for_model_selection():
         _exit(stack)
 
 
-def test_joke_router_calls_resolve_group_key_explicitly():
-    """The router itself must invoke resolve_group_key for /joke so the
-    DM → active-group / 'default' resolution contract is visible at the
-    router level and not hidden inside Prepared construction."""
+def test_joke_forwards_same_group_key_as_q_and_a_path():
+    """Parity: /joke must forward the SAME Prepared.group_key that the normal
+    TA Q&A path consumes (bot/ai.py::answer reads p.group_key directly). This
+    locks in 'same effective model-context as other TA LLM paths' rather than
+    any /joke-specific re-resolution that could drift."""
     stack = _patches(welcomed_already=True)
     _enter(stack)
     try:
+        from bot.ta.prepare import prepare as real_prepare
+
+        captured = {}
+
+        def spy_prepare(msg):
+            p = real_prepare(msg)
+            captured["p"] = p
+            return p
+
         with patch("bot.ta.admin.send_message"), \
              patch("bot.ta.admin.jokes.generate_joke", return_value="haha") as gj, \
-             patch("bot.ta.admin.resolve_group_key", return_value="-100777") as rgk:
+             patch("bot.ta.admin.prepare", side_effect=spy_prepare), \
+             patch("bot.ta.state.get_active_group_id", return_value="-100888"):
             from bot.ta.admin import route
             route(_msg(chat_type="private", chat_id=42, username="student",
                        text="/joke about coffee"))
-            rgk.assert_called_with("private", 42)
-            # And the resolved value is what got forwarded, not p.group_key.
-            assert gj.call_args.args[1] == "-100777"
+            # The router forwarded the same key that lives on Prepared — the
+            # exact field bot/ai.py::answer uses for get_active_model(...).
+            assert gj.call_args.args[1] == captured["p"].group_key
+            assert captured["p"].group_key == "-100888"
+
+
+    finally:
+        _exit(stack)
+
+
+def test_joke_router_swallows_send_message_exceptions():
+    """If send_message raises at the boundary, the /joke branch must not
+    propagate the exception out of route() — matches the error-path handling
+    the rest of the router uses around LLM-backed calls."""
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message", side_effect=RuntimeError("boom")), \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="haha"):
+            from bot.ta.admin import route
+            # Must return normally, not raise.
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke about coffee"))
     finally:
         _exit(stack)
 

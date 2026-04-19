@@ -18,7 +18,6 @@ from bot.ta.state import (
     mark_dm_welcomed,
     register_group,
     remember_user_chat,
-    resolve_group_key,
     ta_rate_check_and_inc,
     ta_rate_should_notify,
 )
@@ -126,16 +125,20 @@ def route(message) -> None:
     #     visible so the chat sees the setup before the punchline.
     if p.is_command and p.command == "joke":
         theme = (p.command_args or "").strip()
-        # Resolve explicitly here so the DM → active-group (or "default")
-        # model-selection contract is visible at the router and testable
-        # without relying on Prepared.group_key being pre-resolved.
-        model_group_key = resolve_group_key(p.chat_type, p.chat_id)
-        with keep_typing(p.chat_id):
-            joke_text = jokes.generate_joke(theme, model_group_key)
-        if joke_text:
-            send_message(p.chat_id, joke_text)
-        else:
-            send_message(p.chat_id, "\U0001f605 Couldn't think of one \u2014 try again in a moment.")
+        # Use p.group_key — the SAME effective model-context key that
+        # bot/ai.py::answer consumes for the Q&A path. prepare() resolved
+        # it via resolve_group_key (active group id, or "default" in DMs),
+        # so an instructor-set /model override applies identically here.
+        try:
+            with keep_typing(p.chat_id):
+                joke_text = jokes.generate_joke(theme, p.group_key or "default")
+            send_message(
+                p.chat_id,
+                joke_text or "\U0001f605 Couldn't think of one \u2014 try again in a moment.",
+            )
+        except Exception as e:
+            print(f"[ta.admin] /joke handler error: {e}")
+            traceback.print_exc()
         return
 
     # 4. Admin + command.
