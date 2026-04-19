@@ -474,3 +474,134 @@ def test_feedback_no_text_shows_usage():
         _cmd_feedback(_prepared(command="feedback", command_args=""))
         assert "Usage" in sm.call_args.args[1]
         af.assert_not_called()
+
+
+# ── /roll ─────────────────────────────────────────────────────────────────
+def test_roll_picks_integer_within_inclusive_bounds():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint", return_value=7) as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="1 15", is_dm=False))
+        ri.assert_called_once_with(1, 15)
+        chat_id, text = sm.call_args.args[0], sm.call_args.args[1]
+        # Result posts to the same chat (group in this case).
+        assert chat_id == -100123
+        assert "7" in text
+        assert "1" in text and "15" in text
+
+
+def test_roll_handles_reversed_arguments():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint", return_value=5) as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="15 1"))
+        # Bounds are normalized so low <= high before calling randint.
+        ri.assert_called_once_with(1, 15)
+        assert "5" in sm.call_args.args[1]
+
+
+def test_roll_handles_equal_bounds():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint", return_value=5) as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="5 5"))
+        ri.assert_called_once_with(5, 5)
+        assert "5" in sm.call_args.args[1]
+
+
+def test_roll_handles_negative_bounds():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint", return_value=-4) as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="-10 -1"))
+        ri.assert_called_once_with(-10, -1)
+        assert "-4" in sm.call_args.args[1]
+
+
+def test_roll_in_dm_posts_to_dm_chat():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint", return_value=3):
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="1 6", is_dm=True, user_id=42))
+        # DM invocation: result goes to the DM chat (== user_id for Telegram DMs).
+        assert sm.call_args.args[0] == 42
+
+
+def test_roll_missing_args_in_dm_replies_to_dm_chat():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="", user_id=42))
+        ri.assert_not_called()
+        # In DM, chat_id == user_id, so the usage reply lands in the DM.
+        assert sm.call_args.args[0] == 42
+        assert "Usage" in sm.call_args.args[1]
+
+
+def test_roll_single_arg_shows_usage():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="7"))
+        ri.assert_not_called()
+        assert "Usage" in sm.call_args.args[1]
+
+
+def test_roll_too_many_args_shows_usage():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="1 5 9"))
+        ri.assert_not_called()
+        assert "Usage" in sm.call_args.args[1]
+
+
+def test_roll_non_integer_arg_shows_error():
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(command="roll", command_args="abc 15"))
+        ri.assert_not_called()
+        assert "integer" in sm.call_args.args[1].lower()
+
+
+def test_roll_invalid_args_from_group_routes_to_chat():
+    """Bad-args path in a group must reply to the group, not p.user_id —
+    so we never depend on the admin having an open DM with the bot."""
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(
+            command="roll", command_args="abc 15", is_dm=False, user_id=42,
+        ))
+        ri.assert_not_called()
+        assert sm.call_args.args[0] == -100123
+        assert sm.call_args.args[0] != 42
+        assert "integer" in sm.call_args.args[1].lower()
+
+
+def test_roll_missing_args_from_group_routes_to_chat():
+    """No-args usage path in a group also goes to the group, not p.user_id."""
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(
+            command="roll", command_args="", is_dm=False, user_id=42,
+        ))
+        ri.assert_not_called()
+        assert sm.call_args.args[0] == -100123
+        assert sm.call_args.args[0] != 42
+        assert "Usage" in sm.call_args.args[1]
+
+
+def test_roll_registered_in_dispatcher():
+    from bot.ta.commands import _REGISTRY
+    assert "roll" in _REGISTRY
+
+
+def test_help_lists_roll_command():
+    with patch("bot.ta.commands.send_message") as sm:
+        from bot.ta.commands import _cmd_help
+        _cmd_help(_prepared(command="help"))
+        text = sm.call_args.args[1]
+        assert "/roll" in text

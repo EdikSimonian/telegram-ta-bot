@@ -6,6 +6,7 @@ stages add /doc, /quiz, /stats, /grade, /announce, /purge, /reveal.
 from __future__ import annotations
 
 import html
+import random
 import time
 from typing import Callable
 
@@ -64,8 +65,14 @@ def _register(*names: str):
 def dispatch(p: Prepared) -> None:
     """Route an admin command to its handler.
 
-    Replies are always DM'd to the admin. If the command was typed in a
-    group, the router has already deleted the original message.
+    Most commands DM their reply to the admin. Engagement commands
+    (``/quiz``, ``/joke``, ``/announce``) instead post the *result* to
+    the originating chat so the class sees it, while still DM'ing
+    errors/usage to the admin. ``/roll`` is fully chat-local: every
+    reply (result, usage, error) goes to the chat where it was typed,
+    so we never depend on ``p.user_id`` being a usable DM target. If
+    the command was typed in a group, the router has already deleted
+    the original message.
     """
     cmd = (p.command or "").lower()
     handler = _REGISTRY.get(cmd)
@@ -127,6 +134,7 @@ def _cmd_help(p: Prepared) -> None:
         "/quiz [topic] — post an MC question",
         "/reveal — end active quiz early",
         "/joke [theme] — post a short joke (e.g. /joke about python)",
+        "/roll &lt;min&gt; &lt;max&gt; — pick a random integer in [min, max]",
         "/stats — message counts + quiz scores",
         "/stats reset — clear stats for active group",
         "/grade — engagement scores",
@@ -367,6 +375,42 @@ def _cmd_joke(p: Prepared) -> None:
 
     if not joke_mod.tell_joke(theme, model_group_key, target_chat):
         send_message(p.user_id, "Couldn't generate a joke — see logs.")
+
+
+# ── /roll <min> <max> ─────────────────────────────────────────────────────
+@_register("roll")
+def _cmd_roll(p: Prepared) -> None:
+    """Pick a random integer between two inclusive bounds.
+
+    Examples: ``/roll 1 15``, ``/roll -3 3``, ``/roll 15 1`` (reversed is fine).
+    All replies — result, usage, and errors — go to the originating chat
+    (DM or group). Routing to ``p.user_id`` for the error paths would
+    break for admins who triggered ``/roll`` in a group without first
+    starting a private chat with the bot.
+    """
+    target_chat = p.chat_id
+    tokens = (p.command_args or "").split()
+    if len(tokens) != 2:
+        send_message(
+            target_chat,
+            "Usage: <code>/roll &lt;min&gt; &lt;max&gt;</code> — e.g. <code>/roll 1 15</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        a = int(tokens[0])
+        b = int(tokens[1])
+    except ValueError:
+        send_message(
+            target_chat,
+            "Both arguments must be integers. Usage: "
+            "<code>/roll &lt;min&gt; &lt;max&gt;</code>",
+            parse_mode="HTML",
+        )
+        return
+    low, high = (a, b) if a <= b else (b, a)
+    n = random.randint(low, high)
+    send_message(target_chat, f"🎲 <b>{n}</b> (from {low}–{high})", parse_mode="HTML")
 
 
 # ── /stats [reset] ────────────────────────────────────────────────────────
