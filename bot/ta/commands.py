@@ -15,6 +15,7 @@ from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS, VE
 from bot.ta import announcements as ann_mod
 from bot.ta import docs as docs_mod
 from bot.ta import git_ingest as git_mod
+from bot.ta import joke as joke_mod
 from bot.ta import quiz as quiz_mod
 from bot.ta import rag as rag_mod
 from bot.ta import stats as stats_mod
@@ -125,6 +126,7 @@ def _cmd_help(p: Prepared) -> None:
         "<b>Engagement</b>",
         "/quiz [topic] — post an MC question",
         "/reveal — end active quiz early",
+        "/joke [theme] — post a short joke (e.g. /joke about python)",
         "/stats — message counts + quiz scores",
         "/stats reset — clear stats for active group",
         "/grade — engagement scores",
@@ -343,6 +345,25 @@ def _cmd_reveal(p: Prepared) -> None:
         return
     if not quiz_mod.reveal_now(target_chat):
         send_message(p.user_id, "No active quiz to reveal in that chat.")
+
+
+# ── /joke [theme] ─────────────────────────────────────────────────────────
+@_register("joke")
+def _cmd_joke(p: Prepared) -> None:
+    """Post a short LLM-generated joke about the given theme.
+
+    In a group: the joke is posted to that group. In DM: posted to the DM
+    if there's no active group, otherwise to the active group so the class
+    can see it. Theme is optional; without one the LLM picks a subject.
+    """
+    theme = (p.command_args or "").strip()
+    if p.is_dm:
+        target_chat = get_active_group_id() or p.chat_id
+    else:
+        target_chat = p.chat_id
+
+    if not joke_mod.tell_joke(theme, p.group_key, target_chat):
+        send_message(p.user_id, "Couldn't generate a joke — see logs.")
 
 
 # ── /stats [reset] ────────────────────────────────────────────────────────
