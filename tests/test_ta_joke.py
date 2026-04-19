@@ -323,6 +323,35 @@ def test_joke_command_addressed_to_other_bot_does_not_fire_in_group():
         _exit(stack)
 
 
+def test_joke_command_addressed_to_other_bot_still_bumps_message_count():
+    """Regression: /joke@OtherBot in a group is NOT a /joke for this bot, so
+    (a) the joke handler must not run AND (b) the generic _bookkeep
+    participation bump for the non-DM message must still fire. If the
+    skip-bump logic were keyed off just `command == "joke"` without
+    checking the target, the off-target message would be silently dropped
+    from analytics even though this bot never handled it."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.bump_message_count") as bmc, \
+             patch("bot.ta.admin.joke.generate") as gen, \
+             patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.send_reply") as sr, \
+             patch("bot.ta.admin._answer_question"):
+            from bot.ta.admin import route
+            route(_msg(username="student", text="/joke@OtherBot about python"))
+            gen.assert_not_called()
+            sr.assert_not_called()
+            # Off-target: counts as ordinary group chatter.
+            bmc.assert_called_once()
+            args = bmc.call_args.args
+            assert args[1] == 42
+            assert args[2] == "student"
+            assert args[3] == "Alice"
+    finally:
+        _exit(stack)
+
+
 def test_joke_command_addressed_to_this_bot_still_fires():
     """/joke@testbot about python — the explicit target matches our bot, so
     the joke handler must still run."""

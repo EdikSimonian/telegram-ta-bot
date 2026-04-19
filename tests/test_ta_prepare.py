@@ -118,6 +118,23 @@ def test_prepare_rejects_command_aimed_at_other_bot():
         from bot.ta.prepare import prepare
         p = prepare(_msg(text="/help@otherbot"))
         assert p.is_command is False
+        # command_target is preserved even when the command is rejected,
+        # so _bookkeep can distinguish off-target /cmd from ordinary chatter.
+        assert p.command_target == "otherbot"
+
+
+def test_prepare_command_target_is_none_for_bare_command():
+    with patch("bot.ta.state.redis", None):
+        from bot.ta.prepare import prepare
+        p = prepare(_msg(text="/quiz python"))
+        assert p.command_target is None
+
+
+def test_prepare_command_target_set_for_our_bot():
+    with patch("bot.ta.state.redis", None):
+        from bot.ta.prepare import prepare
+        p = prepare(_msg(text="/help@testbot"))
+        assert p.command_target == "testbot"
 
 
 def test_prepare_plain_text_not_command():

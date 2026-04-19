@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import traceback
 
-from bot.clients import bot
+from bot.clients import BOT_INFO, bot
 from bot.config import DEFAULT_MODEL, TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
 from bot.helpers import keep_typing, send_reply
 from bot.ta import announcements, commands, joke, quiz, welcome
@@ -31,9 +31,17 @@ def _bookkeep(p: Prepared) -> None:
     remember_user_chat(p.username, p.user_id)
     if not p.is_dm and p.user_id:
         # /joke only counts on success; the success path inside _handle_joke
-        # bumps the count itself. Skipping here avoids crediting invalid
-        # usage, rate-limited attempts, or LLM failures.
-        if not (p.is_command and p.command == "joke"):
+        # bumps the count itself. Skip the generic bump ONLY for /joke
+        # commands this bot will actually handle — off-target
+        # /joke@OtherBot messages are not ours to answer and must still
+        # count as ordinary group chatter for participation analytics.
+        our_username = (getattr(BOT_INFO, "username", "") or "").lower()
+        is_our_joke = (
+            p.is_command
+            and p.command == "joke"
+            and p.command_target in (None, "", our_username)
+        )
+        if not is_our_joke:
             bump_message_count(p.group_key, p.user_id, p.username, p.first_name)
         # Fallback auto-register for groups the bot is already in when the
         # webhook was first registered: my_chat_member only fires for NEW

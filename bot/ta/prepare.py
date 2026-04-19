@@ -31,6 +31,7 @@ class Prepared:
     is_command: bool
     command: str | None       # lowercased, no leading slash
     command_args: str         # everything after the command word
+    command_target: str | None  # lowercase "@target" bot name, or None if none given
     is_reply_to_bot: bool
     reply_to_username: str | None
     mentions_other_user: bool  # any @-mention that isn't the bot
@@ -48,18 +49,31 @@ def _strip_mention(text: str, bot_username: str | None) -> str:
     return text.replace(f"@{bot_username}", "").replace(f"@{bot_username.lower()}", "").strip()
 
 
-def _parse_command(text: str, bot_username: str | None) -> tuple[bool, str | None, str]:
+def _parse_command(
+    text: str, bot_username: str | None
+) -> tuple[bool, str | None, str, str | None]:
+    """Parse a ``/command`` line.
+
+    Returns ``(is_command, command, args, command_target)``. ``command_target``
+    is the lowercase ``@target`` bot name from ``/cmd@target ...`` or ``None``
+    when no target was given. It is preserved even for off-target commands so
+    downstream callers can distinguish ``/cmd`` from ``/cmd@someone_else``.
+    """
     if not text or not text.startswith("/"):
-        return False, None, ""
+        return False, None, "", None
     head, _, rest = text.strip().partition(" ")
     cmd = head[1:]
+    target: str | None = None
     # Handle "/cmd@botname"
     if "@" in cmd:
-        cmd, _, target = cmd.partition("@")
-        if bot_username and target.lower() != bot_username.lower():
-            # Command explicitly aimed at another bot — ignore as command.
-            return False, None, ""
-    return True, cmd.lower(), rest.strip()
+        cmd, _, target_raw = cmd.partition("@")
+        target = target_raw.lower() or None
+        if bot_username and target and target != bot_username.lower():
+            # Command explicitly aimed at another bot — ignore as command,
+            # but keep the target so the router can tell it apart from
+            # ordinary chatter.
+            return False, None, "", target
+    return True, cmd.lower(), rest.strip(), target
 
 
 def _entity_mentions(message) -> list[str]:
@@ -110,7 +124,7 @@ def prepare(message) -> Prepared:
             if bot_username and reply_uname and reply_uname.lower() == bot_username.lower():
                 is_reply_to_bot = True
 
-    is_command, command, command_args = _parse_command(text, bot_username)
+    is_command, command, command_args, command_target = _parse_command(text, bot_username)
     stripped = _strip_mention(text, bot_username)
 
     # Look up via the module so tests patching bot.ta.state.is_admin take effect.
@@ -131,6 +145,7 @@ def prepare(message) -> Prepared:
         is_command=is_command,
         command=command,
         command_args=command_args,
+        command_target=command_target,
         is_reply_to_bot=is_reply_to_bot,
         reply_to_username=reply_to_username,
         mentions_other_user=mentions_other_user and not is_mention,
