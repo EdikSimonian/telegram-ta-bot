@@ -23,12 +23,14 @@ _SYSTEM_PROMPT = (
 )
 
 
-def generate_joke(theme: str, group_key: str | None = None) -> str | None:
+def generate_joke(theme: str, group_key: str = "default") -> str | None:
     """Ask the LLM for a short, clean joke on ``theme``.
 
     Returns the joke text, or ``None`` if the LLM call failed or returned
-    an empty string. ``group_key`` is used to honor the per-group active
-    model so ``/model <name>`` switches apply here too.
+    an empty/malformed reply. ``group_key`` mirrors the convention used by
+    ``bot/ai.py``: the router always resolves it via ``resolve_group_key``
+    (which returns the active group id or ``"default"`` for DMs), so an
+    instructor-set ``/model`` override applies to ``/joke`` from DMs too.
     """
     theme = (theme or "").strip()[:MAX_THEME_LEN]
     if theme:
@@ -36,7 +38,7 @@ def generate_joke(theme: str, group_key: str | None = None) -> str | None:
     else:
         user_prompt = "Tell me one short, clean, family-friendly joke."
 
-    model = (get_active_model(group_key) if group_key else None) or DEFAULT_MODEL
+    model = get_active_model(group_key) or DEFAULT_MODEL
     try:
         resp = ai.chat.completions.create(
             model=model,
@@ -45,7 +47,11 @@ def generate_joke(theme: str, group_key: str | None = None) -> str | None:
                 {"role": "user", "content": user_prompt},
             ],
         )
-        reply = (resp.choices[0].message.content or "").strip()
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return None
+        message = getattr(choices[0], "message", None)
+        reply = (getattr(message, "content", None) or "").strip()
     except Exception as e:
         print(f"[ta.jokes] generate error: {e}")
         return None

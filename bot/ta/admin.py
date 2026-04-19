@@ -124,7 +124,12 @@ def route(message) -> None:
     #     visible so the chat sees the setup before the punchline.
     if p.is_command and p.command == "joke":
         theme = (p.command_args or "").strip()
-        joke_text = jokes.generate_joke(theme, p.group_key)
+        # Wrap in keep_typing so slow providers (HF cold start, Cerebras
+        # spike) don't look like the bot has hung — same UX as the LLM
+        # Q&A path in _answer_question.
+        from bot.helpers import keep_typing
+        with keep_typing(p.chat_id):
+            joke_text = jokes.generate_joke(theme, p.group_key)
         if joke_text:
             send_message(p.chat_id, joke_text)
         else:

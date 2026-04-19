@@ -64,14 +64,28 @@ def test_generate_joke_honors_active_model_for_group():
 
 
 def test_generate_joke_falls_back_to_default_model_when_no_group_key():
+    """Default group_key='default' still consults get_active_model — matching
+    bot/ai.py's convention. When no override is set, we use DEFAULT_MODEL."""
     with patch("bot.ta.jokes.ai") as ai_mock, \
-         patch("bot.ta.jokes.get_active_model") as gam:
+         patch("bot.ta.jokes.get_active_model", return_value=None) as gam:
         ai_mock.chat.completions.create.return_value = _mock_ai_reply("joke")
         from bot.ta.jokes import generate_joke
         from bot.config import DEFAULT_MODEL
-        generate_joke("coffee")  # no group_key
-        gam.assert_not_called()
+        generate_joke("coffee")  # no group_key → default
+        gam.assert_called_once_with("default")
         assert ai_mock.chat.completions.create.call_args.kwargs["model"] == DEFAULT_MODEL
+
+
+def test_generate_joke_honors_active_model_for_dm_context():
+    """DM context (group_key='default') must still pick up an active-model
+    override — same as the regular Q&A path in bot/ai.py."""
+    with patch("bot.ta.jokes.ai") as ai_mock, \
+         patch("bot.ta.jokes.get_active_model", return_value="qwen-3-235b-a22b-instruct-2507") as gam:
+        ai_mock.chat.completions.create.return_value = _mock_ai_reply("joke")
+        from bot.ta.jokes import generate_joke
+        generate_joke("coffee", group_key="default")
+        gam.assert_called_once_with("default")
+        assert ai_mock.chat.completions.create.call_args.kwargs["model"] == "qwen-3-235b-a22b-instruct-2507"
 
 
 def test_generate_joke_returns_none_on_llm_error():
@@ -88,3 +102,32 @@ def test_generate_joke_returns_none_on_empty_llm_reply():
         ai_mock.chat.completions.create.return_value = _mock_ai_reply("   ")
         from bot.ta.jokes import generate_joke
         assert generate_joke("anything") is None
+
+
+def test_generate_joke_returns_none_when_choices_missing():
+    """Malformed response with empty choices list must not raise — return None."""
+    with patch("bot.ta.jokes.ai") as ai_mock, \
+         patch("bot.ta.jokes.get_active_model", return_value=None):
+        ai_mock.chat.completions.create.return_value = MagicMock(choices=[])
+        from bot.ta.jokes import generate_joke
+        assert generate_joke("python") is None
+
+
+def test_generate_joke_returns_none_when_message_is_none():
+    """Choice without a message attribute (or message=None) must not crash."""
+    with patch("bot.ta.jokes.ai") as ai_mock, \
+         patch("bot.ta.jokes.get_active_model", return_value=None):
+        bad = MagicMock()
+        bad.choices = [MagicMock(message=None)]
+        ai_mock.chat.completions.create.return_value = bad
+        from bot.ta.jokes import generate_joke
+        assert generate_joke("python") is None
+
+
+def test_generate_joke_returns_none_when_content_is_none():
+    """choices[0].message.content == None must yield None, not crash."""
+    with patch("bot.ta.jokes.ai") as ai_mock, \
+         patch("bot.ta.jokes.get_active_model", return_value=None):
+        ai_mock.chat.completions.create.return_value = _mock_ai_reply(None)
+        from bot.ta.jokes import generate_joke
+        assert generate_joke("python") is None

@@ -468,6 +468,61 @@ def test_joke_without_theme_passes_empty_string():
         _exit(stack)
 
 
+def test_joke_with_whitespace_only_theme_normalizes_to_empty():
+    """`/joke    ` (only whitespace after the command) must reach the generator
+    with an empty theme so the prompt picks the generic phrasing — not pass
+    meaningless whitespace through to the LLM."""
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="joke") as gj:
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke    "))
+            assert gj.call_args.args[0] == ""
+    finally:
+        _exit(stack)
+
+
+def test_joke_in_dm_forwards_resolved_group_key_for_model_selection():
+    """In a DM the prepared group_key resolves via resolve_group_key
+    (active group id, or 'default'). The router must forward that key to
+    generate_joke so the active-model override applies in DMs too."""
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="haha") as gj, \
+             patch("bot.ta.state.get_active_group_id", return_value="-100999"):
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke about coffee"))
+            # generate_joke(theme, group_key)
+            assert gj.call_args.args[0] == "about coffee"
+            assert gj.call_args.args[1] == "-100999"
+    finally:
+        _exit(stack)
+
+
+def test_joke_in_dm_falls_back_to_default_group_key_when_no_active_group():
+    """No active instructor group set → resolve_group_key returns 'default'
+    in DMs. The router must still forward that key so the joke generator can
+    consult the active-model override under the 'default' bucket."""
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="haha") as gj, \
+             patch("bot.ta.state.get_active_group_id", return_value=None):
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke about coffee"))
+            assert gj.call_args.args[1] == "default"
+    finally:
+        _exit(stack)
+
+
 def test_joke_falls_back_to_apology_on_generator_failure():
     stack = _patches(welcomed_already=True)
     _enter(stack)
