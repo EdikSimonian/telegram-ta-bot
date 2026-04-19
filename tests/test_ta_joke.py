@@ -340,6 +340,47 @@ def test_joke_command_addressed_to_this_bot_still_fires():
         _exit(stack)
 
 
+def test_joke_command_in_group_bumps_message_count():
+    """Successful /joke in a group must count toward shared TA state just
+    like any other student interaction so analytics and moderation stay
+    accurate. Tracking happens in _bookkeep (which runs for every message
+    before routing), not inside _handle_joke — duplicating the call here
+    would double-count."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.bump_message_count") as bmc, \
+             patch("bot.ta.admin.joke.generate", return_value="ha ha"), \
+             patch("bot.ta.admin.send_reply"):
+            from bot.ta.admin import route
+            route(_msg(username="student", text="/joke about python"))
+            bmc.assert_called_once()
+            args = bmc.call_args.args
+            # signature: (group_key, user_id, username, first_name)
+            assert args[1] == 42
+            assert args[2] == "student"
+            assert args[3] == "Alice"
+    finally:
+        _exit(stack)
+
+
+def test_joke_command_in_dm_does_not_bump_message_count():
+    """DMs are not part of group analytics, so _bookkeep skips them and
+    /joke in a DM must not bump any group's message count."""
+    stack = _router_patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.bump_message_count") as bmc, \
+             patch("bot.ta.admin.joke.generate", return_value="ha"), \
+             patch("bot.ta.admin.send_reply"):
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke about python"))
+            bmc.assert_not_called()
+    finally:
+        _exit(stack)
+
+
 def test_joke_command_handles_llm_failure_gracefully():
     stack = _router_patches()
     _enter(stack)

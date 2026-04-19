@@ -124,6 +124,9 @@ def route(message) -> None:
     #     to the source chat (groups too) so everyone sees the joke, and the
     #     command message is NOT deleted. Rate limit applies to students in
     #     groups just like a regular question so /joke can't be spammed.
+    #     Message-count tracking is handled by _bookkeep above (which runs
+    #     for every inbound group message), so /joke participation is
+    #     counted without a duplicate bump inside _handle_joke.
     if p.is_command and p.command == "joke":
         _handle_joke(p)
         return
