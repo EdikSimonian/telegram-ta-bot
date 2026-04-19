@@ -410,6 +410,98 @@ def test_rate_limit_skipped_in_dm():
         _exit(stack)
 
 
+# ── /joke — open to everyone, bypasses the non-admin-command delete ──────
+def test_joke_from_student_in_group_sends_joke_and_skips_llm():
+    """Student /joke must post a joke to the group, not get silently deleted."""
+    stack = _patches()
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message") as sm, \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="knock knock") as gj, \
+             patch("bot.ta.admin.delete_message") as d, \
+             patch("bot.ta.admin.commands.dispatch") as disp, \
+             patch("bot.ta.admin._answer_question") as ans:
+            from bot.ta.admin import route
+            route(_msg(chat_id=-100123, username="student", text="/joke about python"))
+            gj.assert_called_once()
+            theme_arg = gj.call_args.args[0]
+            assert theme_arg == "about python"
+            sm.assert_called_once()
+            assert sm.call_args.args[0] == -100123
+            assert sm.call_args.args[1] == "knock knock"
+            d.assert_not_called()      # command message stays visible
+            disp.assert_not_called()   # does NOT go through admin dispatch
+            ans.assert_not_called()    # does NOT fall through to the LLM Q&A
+    finally:
+        _exit(stack)
+
+
+def test_joke_in_dm_sends_to_user_chat():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message") as sm, \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="haha") as gj, \
+             patch("bot.ta.admin._answer_question") as ans:
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke about coffee"))
+            gj.assert_called_once()
+            sm.assert_called_once()
+            assert sm.call_args.args[0] == 42
+            assert sm.call_args.args[1] == "haha"
+            ans.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_joke_without_theme_passes_empty_string():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message"), \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="joke") as gj:
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student", text="/joke"))
+            assert gj.call_args.args[0] == ""
+    finally:
+        _exit(stack)
+
+
+def test_joke_falls_back_to_apology_on_generator_failure():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message") as sm, \
+             patch("bot.ta.admin.jokes.generate_joke", return_value=None):
+            from bot.ta.admin import route
+            route(_msg(chat_type="private", chat_id=42, username="student",
+                       text="/joke about bugs"))
+            sm.assert_called_once()
+            assert "try again" in sm.call_args.args[1].lower()
+    finally:
+        _exit(stack)
+
+
+def test_joke_from_admin_also_works():
+    """/joke is open to all — admins don't go through the admin dispatcher
+    for this command. Same path as students."""
+    stack = _patches(is_admin=True)
+    _enter(stack)
+    try:
+        with patch("bot.ta.admin.send_message") as sm, \
+             patch("bot.ta.admin.jokes.generate_joke", return_value="punchline") as gj, \
+             patch("bot.ta.admin.commands.dispatch") as disp:
+            from bot.ta.admin import route
+            route(_msg(chat_id=-100123, username="alice", text="/joke about latecomers"))
+            gj.assert_called_once()
+            sm.assert_called_once()
+            assert sm.call_args.args[1] == "punchline"
+            disp.assert_not_called()
+    finally:
+        _exit(stack)
+
+
 # ── Rule 12: default path → RAG + LLM ─────────────────────────────────────
 def test_plain_student_question_goes_to_llm():
     stack = _patches()

@@ -9,7 +9,7 @@ import traceback
 
 from bot.clients import bot
 from bot.config import TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
-from bot.ta import announcements, commands, quiz, welcome
+from bot.ta import announcements, commands, jokes, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
     bump_message_count,
@@ -116,6 +116,19 @@ def route(message) -> None:
             else:
                 add_feedback(text, p.username)
                 send_message(p.user_id, "\u2705 Feedback received. Thank you!")
+        return
+
+    # 3d. /joke is open to ALL users (students included). Kept above the
+    #     admin gate so student commands in groups aren't silently deleted
+    #     by the non-admin branch below. The command text itself stays
+    #     visible so the chat sees the setup before the punchline.
+    if p.is_command and p.command == "joke":
+        theme = (p.command_args or "").strip()
+        joke_text = jokes.generate_joke(theme, p.group_key)
+        if joke_text:
+            send_message(p.chat_id, joke_text)
+        else:
+            send_message(p.chat_id, "\U0001f605 Couldn't think of one \u2014 try again in a moment.")
         return
 
     # 4. Admin + command.
