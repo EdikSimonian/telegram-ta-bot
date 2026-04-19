@@ -135,6 +135,14 @@ jobs:
         env:
           CLAUDE_ROUTINE_ID:    ${{ secrets.CLAUDE_ROUTINE_ID }}
           CLAUDE_ROUTINE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_TOKEN }}
+          # Fine-grained PAT used ONLY for the squash-merge call below.
+          # GitHub intentionally silences workflow triggers on pushes
+          # made by the default GITHUB_TOKEN (anti-recursion), which is
+          # why auto-merges under it did not fire deploy.yml. Pushes
+          # made under a PAT identity trigger downstream workflows
+          # normally. Scoped to contents:rw + pull-requests:rw on this
+          # repo only.
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           PR_NUMBER:    ${{ github.event.pull_request.number }}
           PR_BRANCH:    ${{ github.head_ref }}
           PR_URL:       ${{ github.event.pull_request.html_url }}
@@ -161,6 +169,17 @@ jobs:
             MERGE_BODY="${PR_BODY}
 
           [pr-tested] by AI PR Review workflow run ${{ github.run_id }}"
+
+            # Swap GH_TOKEN to the PAT for the merge push so deploy.yml
+            # fires. If the PAT is missing the merge still works under
+            # GITHUB_TOKEN, but no deploy will trigger — warn loudly so
+            # it's visible in the run log.
+            if [ -n "${RELEASE_TOKEN:-}" ]; then
+              export GH_TOKEN="$RELEASE_TOKEN"
+            else
+              echo "::warning::RELEASE_TOKEN secret missing — merge will succeed but deploy.yml will not fire. Add a fine-grained PAT secret named RELEASE_TOKEN (contents:rw, pull-requests:rw) to restore auto-deploy."
+            fi
+
             if gh pr merge "$PR_NUMBER" --squash --delete-branch --subject "$SUBJECT" --body "$MERGE_BODY" --auto \
                || gh pr merge "$PR_NUMBER" --squash --delete-branch --subject "$SUBJECT" --body "$MERGE_BODY"; then
               echo "merged=true"   >> "$GITHUB_OUTPUT"
