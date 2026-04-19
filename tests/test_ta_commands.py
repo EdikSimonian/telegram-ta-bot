@@ -527,13 +527,13 @@ def test_roll_in_dm_posts_to_dm_chat():
         assert sm.call_args.args[0] == 42
 
 
-def test_roll_missing_args_shows_usage_to_user():
+def test_roll_missing_args_in_dm_replies_to_dm_chat():
     with patch("bot.ta.commands.send_message") as sm, \
          patch("bot.ta.commands.random.randint") as ri:
         from bot.ta.commands import _cmd_roll
         _cmd_roll(_prepared(command="roll", command_args="", user_id=42))
         ri.assert_not_called()
-        # Usage goes to user DM, not the (possibly group) chat.
+        # In DM, chat_id == user_id, so the usage reply lands in the DM.
         assert sm.call_args.args[0] == 42
         assert "Usage" in sm.call_args.args[1]
 
@@ -563,6 +563,35 @@ def test_roll_non_integer_arg_shows_error():
         _cmd_roll(_prepared(command="roll", command_args="abc 15"))
         ri.assert_not_called()
         assert "integer" in sm.call_args.args[1].lower()
+
+
+def test_roll_invalid_args_from_group_routes_to_chat():
+    """Bad-args path in a group must reply to the group, not p.user_id —
+    so we never depend on the admin having an open DM with the bot."""
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(
+            command="roll", command_args="abc 15", is_dm=False, user_id=42,
+        ))
+        ri.assert_not_called()
+        assert sm.call_args.args[0] == -100123
+        assert sm.call_args.args[0] != 42
+        assert "integer" in sm.call_args.args[1].lower()
+
+
+def test_roll_missing_args_from_group_routes_to_chat():
+    """No-args usage path in a group also goes to the group, not p.user_id."""
+    with patch("bot.ta.commands.send_message") as sm, \
+         patch("bot.ta.commands.random.randint") as ri:
+        from bot.ta.commands import _cmd_roll
+        _cmd_roll(_prepared(
+            command="roll", command_args="", is_dm=False, user_id=42,
+        ))
+        ri.assert_not_called()
+        assert sm.call_args.args[0] == -100123
+        assert sm.call_args.args[0] != 42
+        assert "Usage" in sm.call_args.args[1]
 
 
 def test_roll_registered_in_dispatcher():
