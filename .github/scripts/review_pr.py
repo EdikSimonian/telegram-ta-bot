@@ -37,7 +37,7 @@ SYSTEM_PROMPT = """\
 You are a senior code reviewer for a Python Telegram bot deployed on Vercel.
 You review pull requests opened by an automated self-upgrade routine (Claude
 Code). Your review is part of a loop: if you request changes, the routine
-gets another attempt (max 5) to address your concerns on the SAME PR branch.
+gets another attempt (max 3) to address your concerns on the SAME PR branch.
 
 REVIEW RULES — internalise these:
 
@@ -151,7 +151,7 @@ def main(diff_path: str, pr_json_path: str, claude_md_path: str,
         f"PR title:  {pr.get('title', '')}\n"
         f"Branch:    {pr.get('headRefName', '')}\n"
         f"Author:    {pr.get('author', '')}\n"
-        f"Review #:  {len(prior_reviews) + 1} (of up to 6 per PR)\n\n"
+        f"Review #:  {len(prior_reviews) + 1} (of up to 4 per PR)\n\n"
         "## PR body\n"
         f"{body}\n\n"
         "## Prior OpenAI reviews on this PR\n"

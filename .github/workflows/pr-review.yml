@@ -4,11 +4,12 @@ name: AI PR Review
 # Code self-upgrade routine AND runs the project's own pytest suite
 # against the PR head. Merge requires BOTH gates to be green:
 #   - Verdict ✅ AND tests pass → squash-merge + delete branch
-#   - Either gate red, retries < 5 → fire the self-upgrade routine with
-#       a RETRY: payload containing the review + test failure output
-#       (if any). Routine pushes a fix to the same branch, which
-#       re-triggers this workflow.
-#   - Either gate red, retries ≥ 5 → post a "giving up" comment and
+#   - Either gate red, retries < 3 → fire the self-upgrade routine with
+#       a RETRY: payload containing the prior reviews, branch commit
+#       history, latest review, and test failure output (if any).
+#       Routine pushes a fix to the same branch, which re-triggers this
+#       workflow.
+#   - Either gate red, retries ≥ 3 → post a "giving up" comment and
 #       leave the PR for a human.
 
 on:
@@ -66,6 +67,16 @@ jobs:
 
           prior_count=$(python -c "import json,sys; print(len(json.load(open('prior_reviews.json'))))")
           echo "prior_count=$prior_count" >> "$GITHUB_OUTPUT"
+
+          # Branch commit history so the retry payload can show the
+          # routine what each of its prior attempts claimed to fix. Without
+          # this, each retry has amnesia and can undo resolved work or
+          # oscillate between competing fixes. `gh pr view --json commits`
+          # returns them oldest-first, which matches our "Prior review #N
+          # (oldest first)" convention in the payload below.
+          gh pr view "$PR" --json commits \
+            -q '[.commits[] | "\(.oid[0:7]) \(.messageHeadline)\n\(.messageBody // "")"] | join("\n\n---\n\n")' \
+            > commits.txt
 
           # Bail early if the diff is empty — nothing to review.
           if [ ! -s pr.diff ]; then
@@ -177,10 +188,10 @@ jobs:
 
           # PRIOR_COUNT reflects reviews BEFORE the current one. After
           # the one we just posted, this PR has PRIOR_COUNT+1 reviews.
-          # We cap total routine fires at 5, which means we stop
-          # retrying once PRIOR_COUNT >= 5.
-          if [ "$PRIOR_COUNT" -ge 5 ]; then
-            echo "Max 5 retries reached — not firing routine."
+          # We cap total routine fires at 3, which means we stop
+          # retrying once PRIOR_COUNT >= 3.
+          if [ "$PRIOR_COUNT" -ge 3 ]; then
+            echo "Max 3 retries reached — not firing routine."
             gh pr comment "$PR_NUMBER" --body "🛑 **Auto-retry exhausted.** This PR has been reviewed $((PRIOR_COUNT + 1)) times with unresolved concerns. Please address the feedback manually."
             echo "retried=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -204,7 +215,7 @@ jobs:
           PY
 
           ATTEMPT=$((PRIOR_COUNT + 1))
-          echo "Firing routine — retry attempt $ATTEMPT of 5 for PR #$PR_NUMBER."
+          echo "Firing routine — retry attempt $ATTEMPT of 3 for PR #$PR_NUMBER."
 
           python - <<PY
           import json, os, pathlib, sys, urllib.request
@@ -212,6 +223,56 @@ jobs:
           review = pathlib.Path("review.md").read_text()
           original = pathlib.Path("original_request.txt").read_text().strip()
           tests_passed = "${TESTS_PASSED}" == "true"
+
+          # Prior OpenAI reviews on this PR (oldest first). The reviewer's
+          # system prompt tells it to abbreviate recurring issues as
+          # "Still present: ... (see prior review)" — which is useless
+          # unless the routine can read those prior reviews. Without this,
+          # each retry sees a truncated stub and has to guess.
+          try:
+              prior_reviews = json.loads(pathlib.Path("prior_reviews.json").read_text() or "[]")
+              if not isinstance(prior_reviews, list):
+                  prior_reviews = []
+          except Exception:
+              prior_reviews = []
+          prior_section = ""
+          if prior_reviews:
+              blocks = []
+              for i, body in enumerate(prior_reviews, start=1):
+                  body = (body or "").strip()
+                  if len(body) > 6000:
+                      body = body[:6000] + "\n\n[...truncated]"
+                  blocks.append(f"### Prior review #{i} (oldest first)\n{body}")
+              joined = "\n\n".join(blocks)
+              if len(joined) > 24000:
+                  joined = joined[-24000:]
+              prior_section = (
+                  "\n## Prior reviewer concerns on this PR\n"
+                  "The latest review abbreviates recurring issues as "
+                  "'Still present: <gist> (see prior review)'. Read these "
+                  "earlier reviews for the full detail of those recurring asks.\n\n"
+                  f"{joined}\n"
+              )
+
+          # Branch commit history — what each prior retry on this same
+          # branch claimed to fix. Lets the routine recognise when it is
+          # oscillating between approaches or about to undo resolved work.
+          commits_section = ""
+          try:
+              commits_text = pathlib.Path("commits.txt").read_text().strip()
+          except Exception:
+              commits_text = ""
+          if commits_text:
+              if len(commits_text) > 6000:
+                  commits_text = commits_text[:6000] + "\n\n[...truncated]"
+              commits_section = (
+                  "\n## Prior attempts on this branch (commits, oldest first)\n"
+                  "What each previous retry claimed to fix. Read carefully "
+                  "before choosing a new direction: if a concern was marked "
+                  "resolved in a prior round, do not re-introduce it; if the "
+                  "last attempt flipped an approach, do not flip it back.\n\n"
+                  f"```\n{commits_text}\n```\n"
+              )
 
           # If tests failed in CI, append the last 80 lines so the
           # routine can diagnose. Cap at ~6KB to stay within budget.
@@ -238,11 +299,13 @@ jobs:
               f"PR_NUMBER: ${PR_NUMBER}\n"
               f"PR_BRANCH: ${PR_BRANCH}\n"
               f"PR_URL:    ${PR_URL}\n"
-              f"ATTEMPT:   ${ATTEMPT} of 5\n"
+              f"ATTEMPT:   ${ATTEMPT} of 3\n"
               f"TESTS_PASSED: {str(tests_passed).lower()}\n\n"
               "## Original instructor request\n"
-              f"{original}\n\n"
-              "## Latest reviewer concerns (address these)\n"
+              f"{original}\n"
+              f"{commits_section}"
+              f"{prior_section}"
+              "\n## Latest reviewer concerns (address these)\n"
               f"{review}\n"
               f"{test_section}"
           )
@@ -278,7 +341,7 @@ jobs:
           test_line=""
           [ "$TESTS_OK" = "0" ] && test_line=" Test failures were included in the payload."
 
-          gh pr comment "$PR_NUMBER" --body "🔁 **Auto-retry $ATTEMPT/5 triggered.** The self-upgrade routine is addressing the reviewer's concerns on this branch.$test_line Session: $SESSION_URL"
+          gh pr comment "$PR_NUMBER" --body "🔁 **Auto-retry $ATTEMPT/3 triggered.** The self-upgrade routine is addressing the reviewer's concerns on this branch.$test_line Session: $SESSION_URL"
 
           echo "retried=true" >> "$GITHUB_OUTPUT"
 
