@@ -46,7 +46,14 @@ def generate_joke(theme: str, group_key: str) -> str | None:
             model=model,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = (resp.choices[0].message.content or "").strip()
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return None
+        message = getattr(choices[0], "message", None)
+        raw = getattr(message, "content", "") or ""
+        if not isinstance(raw, str):
+            return None
+        raw = raw.strip()
     except Exception as e:
         print(f"[ta.joke] generate error: {e}")
         return None

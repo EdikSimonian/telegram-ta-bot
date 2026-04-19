@@ -68,6 +68,34 @@ def test_generate_joke_returns_none_on_empty_response():
         assert generate_joke("about python", "-100123") is None
 
 
+def test_generate_joke_returns_none_when_choices_missing():
+    with patch("bot.ta.joke.ai") as client, \
+         patch("bot.ta.joke.get_active_model", return_value=None):
+        client.chat.completions.create.return_value = MagicMock(choices=[])
+        from bot.ta.joke import generate_joke
+        assert generate_joke("about python", "-100123") is None
+
+
+def test_generate_joke_returns_none_when_message_is_none():
+    with patch("bot.ta.joke.ai") as client, \
+         patch("bot.ta.joke.get_active_model", return_value=None):
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=None)]
+        )
+        from bot.ta.joke import generate_joke
+        assert generate_joke("about python", "-100123") is None
+
+
+def test_generate_joke_returns_none_when_content_is_non_string():
+    with patch("bot.ta.joke.ai") as client, \
+         patch("bot.ta.joke.get_active_model", return_value=None):
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=[{"type": "text", "text": "hi"}]))]
+        )
+        from bot.ta.joke import generate_joke
+        assert generate_joke("about python", "-100123") is None
+
+
 # ── format_joke_for_display ───────────────────────────────────────────────
 def test_format_includes_theme_in_header():
     from bot.ta.joke import format_joke_for_display
@@ -141,8 +169,10 @@ def test_cmd_joke_in_dm_posts_to_active_group_when_set():
          patch("bot.ta.commands.send_message") as sm, \
          patch("bot.ta.commands.get_active_group_id", return_value="-200999"):
         from bot.ta.commands import _cmd_joke
-        _cmd_joke(_prepared(command_args="about late", is_dm=True, chat_id=42, user_id=42))
-        tj.assert_called_once_with("about late", "-100123", "-200999")
+        _cmd_joke(_prepared(command_args="about late", is_dm=True, chat_id=42,
+                            user_id=42, group_key="dm:42"))
+        # Model context must be the destination group key, not the DM's group_key.
+        tj.assert_called_once_with("about late", "-200999", "-200999")
         sm.assert_not_called()
 
 
@@ -151,8 +181,10 @@ def test_cmd_joke_in_dm_falls_back_to_dm_chat_when_no_active_group():
          patch("bot.ta.commands.send_message") as sm, \
          patch("bot.ta.commands.get_active_group_id", return_value=None):
         from bot.ta.commands import _cmd_joke
-        _cmd_joke(_prepared(command_args="", is_dm=True, chat_id=42, user_id=42))
-        tj.assert_called_once_with("", "-100123", 42)
+        _cmd_joke(_prepared(command_args="", is_dm=True, chat_id=42, user_id=42,
+                            group_key="dm:42"))
+        # No active group → model context stays the DM's own group_key.
+        tj.assert_called_once_with("", "dm:42", 42)
         sm.assert_not_called()
 
 

@@ -358,11 +358,14 @@ def _cmd_joke(p: Prepared) -> None:
     """
     theme = (p.command_args or "").strip()
     if p.is_dm:
-        target_chat = get_active_group_id() or p.chat_id
+        active_group = get_active_group_id()
+        target_chat = active_group if active_group is not None else p.chat_id
+        model_group_key = str(active_group) if active_group is not None else p.group_key
     else:
         target_chat = p.chat_id
+        model_group_key = p.group_key
 
-    if not joke_mod.tell_joke(theme, p.group_key, target_chat):
+    if not joke_mod.tell_joke(theme, model_group_key, target_chat):
         send_message(p.user_id, "Couldn't generate a joke — see logs.")
 
 
