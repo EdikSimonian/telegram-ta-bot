@@ -35,12 +35,12 @@ def test_generate_joke_returns_llm_text():
 
 def test_generate_joke_passes_active_model_when_set():
     with patch("bot.ta.joke.ai") as client, \
-         patch("bot.ta.joke.get_active_model", return_value="gpt-5.4-mini"):
+         patch("bot.ta.joke.get_active_model", return_value="gpt-5.5-mini"):
         client.chat.completions.create.return_value = _llm("knock knock")
         from bot.ta.joke import generate_joke
         generate_joke("about cats", "-100123")
         kwargs = client.chat.completions.create.call_args.kwargs
-        assert kwargs["model"] == "gpt-5.4-mini"
+        assert kwargs["model"] == "gpt-5.5-mini"
 
 
 def test_generate_joke_works_with_blank_theme():

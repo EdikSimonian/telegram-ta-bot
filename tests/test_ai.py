@@ -173,7 +173,7 @@ def test_answer_uses_group_active_model_when_set():
         patch("bot.ai.rag.retrieve", return_value=[]),
         patch("bot.ai.get_history", return_value=[]),
         patch("bot.ai.append_history"),
-        patch("bot.ai.get_active_model", return_value="gpt-5.4-mini"),
+        patch("bot.ai.get_active_model", return_value="gpt-5.5-mini"),
         patch("bot.ai.ai") as client,
     ):
         client.chat.completions.create.return_value = _mock_ai_response("ok")
@@ -181,7 +181,7 @@ def test_answer_uses_group_active_model_when_set():
 
         answer(_prepared())
         assert (
-            client.chat.completions.create.call_args.kwargs["model"] == "gpt-5.4-mini"
+            client.chat.completions.create.call_args.kwargs["model"] == "gpt-5.5-mini"
         )
 
 
@@ -198,7 +198,7 @@ def test_answer_falls_back_to_default_model():
 
         answer(_prepared())
         assert (
-            client.chat.completions.create.call_args.kwargs["model"] == "gpt-5.4-nano"
+            client.chat.completions.create.call_args.kwargs["model"] == "gpt-5.5-nano"
         )
 
 

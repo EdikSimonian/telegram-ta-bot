@@ -243,25 +243,25 @@ def test_model_no_args_lists_all_with_active_marker():
         from bot.ta.commands import _cmd_model
         _cmd_model(_prepared(command="model"))
         text = sm.call_args.args[1]
-        assert "gpt-5.4-nano" in text
-        assert "gpt-5.4-mini" in text
+        assert "gpt-5.5-nano" in text
+        assert "gpt-5.5-mini" in text
         # Current (default) should be marked
         assert "(active)" in text
         # And only the active line carries the marker
         active_lines = [ln for ln in text.splitlines() if "(active)" in ln]
         assert len(active_lines) == 1
-        assert "gpt-5.4-nano" in active_lines[0]
+        assert "gpt-5.5-nano" in active_lines[0]
 
 
 def test_model_no_args_marks_overridden_model_active():
     with patch("bot.ta.commands.send_message") as sm, \
-         patch("bot.ta.commands.get_active_model", return_value="gpt-5.4-mini"):
+         patch("bot.ta.commands.get_active_model", return_value="gpt-5.5-mini"):
         from bot.ta.commands import _cmd_model
         _cmd_model(_prepared(command="model"))
         text = sm.call_args.args[1]
         active_lines = [ln for ln in text.splitlines() if "(active)" in ln]
         assert len(active_lines) == 1
-        assert "gpt-5.4-mini" in active_lines[0]
+        assert "gpt-5.5-mini" in active_lines[0]
 
 
 def test_model_invalid_rejected():
@@ -277,9 +277,9 @@ def test_model_valid_persists():
     with patch("bot.ta.commands.send_message") as sm, \
          patch("bot.ta.commands.set_active_model") as sam:
         from bot.ta.commands import _cmd_model
-        _cmd_model(_prepared(command="model", command_args="gpt-5.4-mini"))
-        sam.assert_called_once_with("-100123", "gpt-5.4-mini")
-        assert "gpt-5.4-mini" in sm.call_args.args[1]
+        _cmd_model(_prepared(command="model", command_args="gpt-5.5-mini"))
+        sam.assert_called_once_with("-100123", "gpt-5.5-mini")
+        assert "gpt-5.5-mini" in sm.call_args.args[1]
 
 
 # ── /group ────────────────────────────────────────────────────────────────

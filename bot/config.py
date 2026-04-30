@@ -7,7 +7,7 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 # ── LLM provider (OpenAI-compatible) ──────────────────────────────────────
 AI_API_KEY = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.openai.com/v1").strip()
-MODEL = os.environ.get("AI_MODEL", "gpt-5.4-nano").strip()
+MODEL = os.environ.get("AI_MODEL", "gpt-5.5-nano").strip()
 QUIZ_MODEL = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
 
 # Models the /model admin command will accept. Kept tight on purpose:
@@ -17,9 +17,6 @@ VALID_MODELS = [
     "gpt-5.5-nano",
     "gpt-5.5-mini",
     "gpt-5.5",
-    "gpt-5.4-nano",
-    "gpt-5.4-mini",
-    "gpt-5.4",
 ]
 DEFAULT_MODEL = MODEL
 
