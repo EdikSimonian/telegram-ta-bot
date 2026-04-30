@@ -5,16 +5,17 @@ Redis is unavailable (unconfigured or unreachable at runtime) — writes
 become no-ops, reads return empty/default values. Callers never need to
 null-check the client themselves.
 """
+
 from __future__ import annotations
 
 import json
 import time
-from typing import Any
 
 from bot.clients import redis
 from bot.config import (
     HISTORY_TTL,
     PERMANENT_ADMIN,
+    PERMANENT_ADMIN_ID,
     REDIS_PREFIX,
     TA_RATE_LIMIT_WINDOW,
 )
@@ -25,22 +26,23 @@ from bot.config import (
 # deployments; override via the REDIS_PREFIX env var (e.g. "ta:prod:").
 _P = REDIS_PREFIX
 
-K_ADMINS           = f"{_P}admins"
-K_USER_CHATS       = f"{_P}userChats"
-K_GROUPS           = f"{_P}groups"
-K_ACTIVE_GROUP     = f"{_P}activeGroupId"
-K_GROUP_WELCOMED   = f"{_P}groupWelcomed"
-K_DM_WELCOMED      = f"{_P}dmWelcomed"
-K_DM_USERS         = f"{_P}dm:users"
-K_KNOWN_THREADS    = f"{_P}knownThreads"
-K_DOCS             = f"{_P}docs"
-K_GIT_REPOS        = f"{_P}gitrepos"
-K_FEEDBACK          = f"{_P}feedback"
+K_ADMINS = f"{_P}admins"  # legacy: set of usernames (lowercase)
+K_ADMIN_IDS = f"{_P}adminIds"  # hash: user_id (str) -> json({username, addedAt})
+K_USER_CHATS = f"{_P}userChats"
+K_GROUPS = f"{_P}groups"
+K_ACTIVE_GROUP = f"{_P}activeGroupId"
+K_GROUP_WELCOMED = f"{_P}groupWelcomed"
+K_DM_WELCOMED = f"{_P}dmWelcomed"
+K_DM_USERS = f"{_P}dm:users"
+K_KNOWN_THREADS = f"{_P}knownThreads"
+K_DOCS = f"{_P}docs"
+K_GIT_REPOS = f"{_P}gitrepos"
+K_FEEDBACK = f"{_P}feedback"
 
 QUIZ_HISTORY_CAP = 20
 FEEDBACK_CAP = 100
 DM_FOLLOWUP_TTL = 86400  # 24 hours
-DM_LOG_CAP = 200           # per-user DM audit log cap (turns, not pairs)
+DM_LOG_CAP = 200  # per-user DM audit log cap (turns, not pairs)
 
 
 def _k_last_group_qa(user_id: int | str) -> str:
@@ -95,6 +97,11 @@ def _k_active_quiz(chat_id: int | str) -> str:
     return f"{_P}activeQuiz:{chat_id}"
 
 
+def _k_quiz_answers(chat_id: int | str) -> str:
+    """Per-chat hash of student answers for the currently active quiz."""
+    return f"{_P}quizAnswers:{chat_id}"
+
+
 def _k_pending_announcement(admin_id: int | str) -> str:
     return f"{_P}pendingAnnouncement:{admin_id}"
 
@@ -115,7 +122,16 @@ def _safe(op, default=None):
 
 
 # ── Admins ────────────────────────────────────────────────────────────────
+# Two parallel stores:
+#   K_ADMINS    — legacy set of usernames (kept for backward compat with
+#                 existing prod data; reads still honor it).
+#   K_ADMIN_IDS — hash of numeric user_id -> json({"username": ..., "addedAt": ...}).
+#                 Username recycling can't grant access here because the key
+#                 is the immutable Telegram user id.
+# Writes go to K_ADMIN_IDS first; the username path remains for `/admin add`
+# fallback when the target hasn't DM'd the bot yet.
 def is_admin(username: str | None) -> bool:
+    """Legacy username-based check. Prefer ``is_admin_id``."""
     if not username:
         return False
     uname = username.lstrip("@").lower()
@@ -124,14 +140,56 @@ def is_admin(username: str | None) -> bool:
     return bool(_safe(lambda: redis.sismember(K_ADMINS, uname), default=False))
 
 
+def is_admin_id(user_id: int | str | None) -> bool:
+    """ID-based admin check — immune to username recycling."""
+    if not user_id:
+        return False
+    uid = str(user_id)
+    if PERMANENT_ADMIN_ID and uid == str(PERMANENT_ADMIN_ID):
+        return True
+    return bool(_safe(lambda: redis.hexists(K_ADMIN_IDS, uid), default=False))
+
+
 def list_admins() -> list[str]:
+    """Union of legacy username admins and ID-based admins (by username for display)."""
     members = _safe(lambda: redis.smembers(K_ADMINS), default=set()) or set()
     admins = {m.lower() for m in members if m}
     admins.add(PERMANENT_ADMIN)
+    id_entries = _safe(lambda: redis.hgetall(K_ADMIN_IDS), default={}) or {}
+    if isinstance(id_entries, dict):
+        for payload in id_entries.values():
+            try:
+                data = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+            uname = (data.get("username") or "").lower()
+            if uname:
+                admins.add(uname)
     return sorted(admins)
 
 
+def list_admin_ids() -> list[dict]:
+    """Return ID-keyed admin entries: [{userId, username, addedAt}, ...]."""
+    raw = _safe(lambda: redis.hgetall(K_ADMIN_IDS), default={}) or {}
+    out: list[dict] = []
+    if isinstance(raw, dict):
+        for uid, payload in raw.items():
+            try:
+                data = json.loads(payload)
+            except (TypeError, ValueError):
+                data = {}
+            out.append(
+                {
+                    "userId": str(uid),
+                    "username": (data.get("username") or "").lower(),
+                    "addedAt": data.get("addedAt"),
+                }
+            )
+    return sorted(out, key=lambda d: d.get("username") or "")
+
+
 def add_admin(username: str) -> bool:
+    """Legacy username-only add. Use ``add_admin_id`` when a user_id is known."""
     uname = username.lstrip("@").lower()
     if not uname:
         return False
@@ -140,12 +198,51 @@ def add_admin(username: str) -> bool:
     return bool(_safe(lambda: redis.sadd(K_ADMINS, uname), default=False))
 
 
+def add_admin_id(user_id: int | str, username: str | None = None) -> bool:
+    """Grant admin to a Telegram user_id. Stores username (if any) for display."""
+    if not user_id:
+        return False
+    uid = str(user_id)
+    if PERMANENT_ADMIN_ID and uid == str(PERMANENT_ADMIN_ID):
+        return True
+    payload = json.dumps(
+        {
+            "username": (username or "").lstrip("@").lower(),
+            "addedAt": int(time.time()),
+        }
+    )
+    return bool(
+        _safe(lambda: redis.hset(K_ADMIN_IDS, values={uid: payload}), default=False)
+    )
+
+
 def remove_admin(username: str) -> bool:
-    """Remove an admin. Returns False when the target is the permanent admin."""
+    """Remove a username-keyed admin. Returns False for the permanent admin."""
     uname = username.lstrip("@").lower()
     if not uname or uname == PERMANENT_ADMIN:
         return False
     _safe(lambda: redis.srem(K_ADMINS, uname), default=None)
+    # Also purge any ID-keyed entry whose stored username matches.
+    raw = _safe(lambda: redis.hgetall(K_ADMIN_IDS), default={}) or {}
+    if isinstance(raw, dict):
+        for uid, payload in raw.items():
+            try:
+                data = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+            if (data.get("username") or "").lower() == uname:
+                _safe(lambda u=uid: redis.hdel(K_ADMIN_IDS, u), default=None)
+    return True
+
+
+def remove_admin_id(user_id: int | str) -> bool:
+    """Revoke admin from a Telegram user_id. Returns False for the permanent admin."""
+    if not user_id:
+        return False
+    uid = str(user_id)
+    if PERMANENT_ADMIN_ID and uid == str(PERMANENT_ADMIN_ID):
+        return False
+    _safe(lambda: redis.hdel(K_ADMIN_IDS, uid), default=None)
     return True
 
 
@@ -153,7 +250,11 @@ def remove_admin(username: str) -> bool:
 def remember_user_chat(username: str | None, user_id: int | str) -> None:
     if not username:
         return
-    _safe(lambda: redis.hset(K_USER_CHATS, values={username.lstrip("@").lower(): str(user_id)}))
+    _safe(
+        lambda: redis.hset(
+            K_USER_CHATS, values={username.lstrip("@").lower(): str(user_id)}
+        )
+    )
 
 
 def get_user_chat(username: str) -> str | None:
@@ -229,7 +330,9 @@ def mark_dm_welcomed(user_id: int | str) -> bool:
 
 
 # ── Rate limiter (TA-specific, rolling window) ────────────────────────────
-def ta_rate_check_and_inc(user_id: int | str, limit: int, window: int = TA_RATE_LIMIT_WINDOW) -> tuple[bool, int]:
+def ta_rate_check_and_inc(
+    user_id: int | str, limit: int, window: int = TA_RATE_LIMIT_WINDOW
+) -> tuple[bool, int]:
     """Increment the user's rolling-window counter.
 
     Returns ``(allowed, remaining)``. If Redis is down we fail open.
@@ -251,7 +354,9 @@ def ta_rate_check_and_inc(user_id: int | str, limit: int, window: int = TA_RATE_
         return True, limit
 
 
-def ta_rate_should_notify(user_id: int | str, window: int = TA_RATE_LIMIT_WINDOW) -> bool:
+def ta_rate_should_notify(
+    user_id: int | str, window: int = TA_RATE_LIMIT_WINDOW
+) -> bool:
     """True the first time in a window — used to notify once then stay silent."""
     if redis is None:
         return True
@@ -266,7 +371,9 @@ def ta_rate_should_notify(user_id: int | str, window: int = TA_RATE_LIMIT_WINDOW
 
 # ── History ───────────────────────────────────────────────────────────────
 def get_history(group_key: str, limit: int = 20) -> list[dict]:
-    raw = _safe(lambda: redis.lrange(_k_history(group_key), -limit, -1), default=[]) or []
+    raw = (
+        _safe(lambda: redis.lrange(_k_history(group_key), -limit, -1), default=[]) or []
+    )
     out: list[dict] = []
     for item in raw:
         try:
@@ -309,12 +416,14 @@ def append_dm_log(
     if redis is None:
         return
     try:
-        payload = json.dumps({
-            "role":    role,
-            "content": content,
-            "ts":      int(time.time()),
-        })
-        log_key  = _k_dm_log(user_id)
+        payload = json.dumps(
+            {
+                "role": role,
+                "content": content,
+                "ts": int(time.time()),
+            }
+        )
+        log_key = _k_dm_log(user_id)
         meta_key = _k_dm_meta(user_id)
         redis.rpush(log_key, payload)
         redis.ltrim(log_key, -DM_LOG_CAP, -1)
@@ -326,11 +435,11 @@ def append_dm_log(
                 base = json.loads(raw)
             except (TypeError, ValueError):
                 base = {}
-        base["userId"]     = str(user_id)
-        base["username"]   = username or base.get("username")
-        base["firstName"]  = first_name or base.get("firstName")
+        base["userId"] = str(user_id)
+        base["username"] = username or base.get("username")
+        base["firstName"] = first_name or base.get("firstName")
         base["lastActive"] = int(time.time())
-        base["turns"]      = int(base.get("turns", 0)) + 1
+        base["turns"] = int(base.get("turns", 0)) + 1
         redis.hset(meta_key, values={"data": json.dumps(base)})
         redis.sadd(K_DM_USERS, str(user_id))
     except Exception as e:
@@ -338,10 +447,13 @@ def append_dm_log(
 
 
 def get_dm_log(user_id: int | str, limit: int = DM_LOG_CAP) -> list[dict]:
-    raw = _safe(
-        lambda: redis.lrange(_k_dm_log(user_id), -limit, -1),
-        default=[],
-    ) or []
+    raw = (
+        _safe(
+            lambda: redis.lrange(_k_dm_log(user_id), -limit, -1),
+            default=[],
+        )
+        or []
+    )
     out: list[dict] = []
     for item in raw:
         try:
@@ -390,68 +502,146 @@ def clear_dm_log(user_id: int | str) -> bool:
 
 
 # ── Stats + scores ────────────────────────────────────────────────────────
-def bump_message_count(group_key: str, user_id: int | str, username: str | None, first_name: str | None) -> None:
+# Two-phase storage so concurrent invocations don't lose updates:
+#   count:{uid}  / right:{uid} / total:{uid}  → integer counters via HINCRBY
+#   meta:{uid}                                → json blob for display fields
+# Legacy data (bare uid → full json blob) is still readable; getters merge
+# legacy + new so no migration is required.
+def bump_message_count(
+    group_key: str, user_id: int | str, username: str | None, first_name: str | None
+) -> None:
     if redis is None:
         return
     try:
         key = _k_stats(group_key)
-        existing_raw = redis.hget(key, str(user_id))
-        base = {}
-        if existing_raw:
-            try:
-                base = json.loads(existing_raw)
-            except (TypeError, ValueError):
-                base = {}
-        base["username"]     = username or base.get("username")
-        base["firstName"]    = first_name or base.get("firstName")
-        base["messageCount"] = int(base.get("messageCount", 0)) + 1
-        base["lastActive"]   = int(time.time())
-        redis.hset(key, values={str(user_id): json.dumps(base)})
+        uid = str(user_id)
+        redis.hincrby(key, f"count:{uid}", 1)
+        meta = json.dumps(
+            {
+                "username": username,
+                "firstName": first_name,
+                "lastActive": int(time.time()),
+            }
+        )
+        redis.hset(key, values={f"meta:{uid}": meta})
     except Exception as e:
         print(f"[ta.state] bump_message_count error: {e}")
 
 
 def get_group_stats(group_key: str) -> dict[str, dict]:
     raw = _safe(lambda: redis.hgetall(_k_stats(group_key)), default={}) or {}
+    if not isinstance(raw, dict):
+        return {}
     out: dict[str, dict] = {}
-    for uid, payload in (raw.items() if isinstance(raw, dict) else []):
-        try:
-            out[uid] = json.loads(payload)
-        except (TypeError, ValueError):
+    legacy: dict[str, dict] = {}
+    for field, val in raw.items():
+        if field.startswith("count:"):
+            uid = field[6:]
+            try:
+                out.setdefault(uid, {})["messageCount"] = int(val)
+            except (TypeError, ValueError):
+                pass
+        elif field.startswith("meta:"):
+            uid = field[5:]
+            try:
+                meta = json.loads(val)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(meta, dict):
+                rec = out.setdefault(uid, {})
+                for k in ("username", "firstName", "lastActive"):
+                    v = meta.get(k)
+                    if v is not None:
+                        rec[k] = v
+        else:
+            try:
+                legacy[field] = json.loads(val)
+            except (TypeError, ValueError):
+                continue
+    # Legacy values are the BASE; new HINCRBY counts ADD on top so nothing
+    # is double-counted and pre-migration data still shows up.
+    for uid, leg in legacy.items():
+        if not isinstance(leg, dict):
             continue
+        rec = out.setdefault(uid, {})
+        rec["messageCount"] = int(leg.get("messageCount", 0)) + rec.get(
+            "messageCount", 0
+        )
+        for k in ("username", "firstName", "lastActive"):
+            rec.setdefault(k, leg.get(k))
+    for rec in out.values():
+        rec.setdefault("messageCount", 0)
     return out
 
 
-def record_quiz_score(group_key: str, user_id: int | str, username: str | None,
-                      first_name: str | None, correct: bool) -> None:
+def record_quiz_score(
+    group_key: str,
+    user_id: int | str,
+    username: str | None,
+    first_name: str | None,
+    correct: bool,
+) -> None:
     if redis is None:
         return
     try:
         key = _k_scores(group_key)
-        raw = redis.hget(key, str(user_id))
-        base = {}
-        if raw:
-            try:
-                base = json.loads(raw)
-            except (TypeError, ValueError):
-                base = {}
-        base["username"]  = username or base.get("username")
-        base["firstName"] = first_name or base.get("firstName")
-        base["correct"]   = int(base.get("correct", 0)) + (1 if correct else 0)
-        base["total"]     = int(base.get("total", 0)) + 1
-        redis.hset(key, values={str(user_id): json.dumps(base)})
+        uid = str(user_id)
+        if correct:
+            redis.hincrby(key, f"right:{uid}", 1)
+        redis.hincrby(key, f"total:{uid}", 1)
+        meta = json.dumps({"username": username, "firstName": first_name})
+        redis.hset(key, values={f"meta:{uid}": meta})
     except Exception as e:
         print(f"[ta.state] record_quiz_score error: {e}")
 
 
 def get_quiz_scores(group_key: str) -> dict[str, dict]:
     raw = _safe(lambda: redis.hgetall(_k_scores(group_key)), default={}) or {}
+    if not isinstance(raw, dict):
+        return {}
     out: dict[str, dict] = {}
-    for uid, payload in (raw.items() if isinstance(raw, dict) else []):
-        try:
-            out[uid] = json.loads(payload)
-        except (TypeError, ValueError):
+    legacy: dict[str, dict] = {}
+    for field, val in raw.items():
+        if field.startswith("right:"):
+            uid = field[6:]
+            try:
+                out.setdefault(uid, {})["correct"] = int(val)
+            except (TypeError, ValueError):
+                pass
+        elif field.startswith("total:"):
+            uid = field[6:]
+            try:
+                out.setdefault(uid, {})["total"] = int(val)
+            except (TypeError, ValueError):
+                pass
+        elif field.startswith("meta:"):
+            uid = field[5:]
+            try:
+                meta = json.loads(val)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(meta, dict):
+                rec = out.setdefault(uid, {})
+                for k in ("username", "firstName"):
+                    v = meta.get(k)
+                    if v is not None:
+                        rec[k] = v
+        else:
+            try:
+                legacy[field] = json.loads(val)
+            except (TypeError, ValueError):
+                continue
+    for uid, leg in legacy.items():
+        if not isinstance(leg, dict):
             continue
+        rec = out.setdefault(uid, {})
+        rec["correct"] = int(leg.get("correct", 0)) + rec.get("correct", 0)
+        rec["total"] = int(leg.get("total", 0)) + rec.get("total", 0)
+        for k in ("username", "firstName"):
+            rec.setdefault(k, leg.get(k))
+    for rec in out.values():
+        rec.setdefault("correct", 0)
+        rec.setdefault("total", 0)
     return out
 
 
@@ -520,7 +710,9 @@ def reset_group_stats(group_key: str) -> None:
 
 # ── Quiz history (for de-duplication in generation) ───────────────────────
 def get_quiz_history(group_key: str) -> list[str]:
-    raw = _safe(lambda: redis.lrange(_k_quiz_history(group_key), 0, -1), default=[]) or []
+    raw = (
+        _safe(lambda: redis.lrange(_k_quiz_history(group_key), 0, -1), default=[]) or []
+    )
     return list(raw) if raw else []
 
 
@@ -551,7 +743,40 @@ def get_active_quiz(chat_id: int | str) -> dict | None:
 
 
 def clear_active_quiz(chat_id: int | str) -> None:
+    # Wipe both the question dict and the answers hash. Defense in depth:
+    # reveal_now also clears answers, but anyone calling clear_active_quiz
+    # directly (admin /reveal abort, test fixtures) shouldn't leak answers
+    # into a future quiz.
     _safe(lambda: redis.delete(_k_active_quiz(chat_id)))
+    _safe(lambda: redis.delete(_k_quiz_answers(chat_id)))
+
+
+# ── Quiz answers (atomic, one HSET per student) ──────────────────────────
+# Stored as a separate hash so concurrent answers from different students
+# can't collide via read-modify-write on the active-quiz dict. One field
+# per user, value is a json blob of letter/username/firstName/ts.
+def record_quiz_answer(chat_id: int | str, user_id: int | str, data: dict) -> None:
+    payload = json.dumps(data)
+    _safe(lambda: redis.hset(_k_quiz_answers(chat_id), values={str(user_id): payload}))
+
+
+def get_quiz_answers(chat_id: int | str) -> dict[str, dict]:
+    raw = _safe(lambda: redis.hgetall(_k_quiz_answers(chat_id)), default={}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for uid, payload in raw.items():
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out[str(uid)] = data
+    return out
+
+
+def clear_quiz_answers(chat_id: int | str) -> None:
+    _safe(lambda: redis.delete(_k_quiz_answers(chat_id)))
 
 
 def list_active_quizzes() -> list[dict]:
@@ -585,12 +810,16 @@ def clear_active_model(group_key: str) -> None:
 PENDING_ANNOUNCEMENT_TTL = 3600
 
 
-def set_pending_announcement(admin_id: int | str, text: str, group_chat_id: int | str) -> None:
+def set_pending_announcement(
+    admin_id: int | str, text: str, group_chat_id: int | str
+) -> None:
     payload = json.dumps({"text": text, "groupChatId": str(group_chat_id)})
     if redis is None:
         return
     try:
-        redis.set(_k_pending_announcement(admin_id), payload, ex=PENDING_ANNOUNCEMENT_TTL)
+        redis.set(
+            _k_pending_announcement(admin_id), payload, ex=PENDING_ANNOUNCEMENT_TTL
+        )
     except Exception as e:
         print(f"[ta.state] set_pending_announcement error: {e}")
 
@@ -641,17 +870,21 @@ def remove_doc(slug: str) -> None:
 
 
 # ── Last group Q&A per student (for DM follow-up) ─────────────────────────
-def save_last_group_qa(user_id: int | str, question: str, answer: str, group_key: str) -> None:
+def save_last_group_qa(
+    user_id: int | str, question: str, answer: str, group_key: str
+) -> None:
     """Snapshot the student's last group Q&A so DM follow-ups have context."""
     if redis is None:
         return
     try:
-        payload = json.dumps({
-            "question": question,
-            "answer": answer,
-            "groupKey": group_key,
-            "ts": int(time.time()),
-        })
+        payload = json.dumps(
+            {
+                "question": question,
+                "answer": answer,
+                "groupKey": group_key,
+                "ts": int(time.time()),
+            }
+        )
         redis.set(_k_last_group_qa(user_id), payload, ex=DM_FOLLOWUP_TTL)
     except Exception as e:
         print(f"[ta.state] save_last_group_qa error: {e}")
@@ -682,7 +915,10 @@ def list_git_repos() -> list[dict]:
 
 def get_git_repo(owner: str, repo: str) -> dict | None:
     for r in list_git_repos():
-        if r.get("owner", "").lower() == owner.lower() and r.get("repo", "").lower() == repo.lower():
+        if (
+            r.get("owner", "").lower() == owner.lower()
+            and r.get("repo", "").lower() == repo.lower()
+        ):
             return r
     return None
 
@@ -695,9 +931,12 @@ def add_git_repo(meta: dict) -> None:
         existing = list_git_repos()
         owner, repo = meta.get("owner", ""), meta.get("repo", "")
         kept = [
-            r for r in existing
-            if not (r.get("owner", "").lower() == owner.lower()
-                    and r.get("repo", "").lower() == repo.lower())
+            r
+            for r in existing
+            if not (
+                r.get("owner", "").lower() == owner.lower()
+                and r.get("repo", "").lower() == repo.lower()
+            )
         ]
         kept.append(meta)
         redis.delete(K_GIT_REPOS)
@@ -716,8 +955,10 @@ def remove_git_repo(owner: str, repo: str) -> dict | None:
         removed = None
         kept = []
         for r in existing:
-            if (r.get("owner", "").lower() == owner.lower()
-                    and r.get("repo", "").lower() == repo.lower()):
+            if (
+                r.get("owner", "").lower() == owner.lower()
+                and r.get("repo", "").lower() == repo.lower()
+            ):
                 removed = r
             else:
                 kept.append(r)
@@ -742,7 +983,9 @@ def resolve_group_key(chat_type: str, chat_id: int | str) -> str:
     return get_active_group_id() or "default"
 
 
-def thread_slug(chat_type: str, chat_id: int | str, user_id: int | str | None = None) -> str:
+def thread_slug(
+    chat_type: str, chat_id: int | str, user_id: int | str | None = None
+) -> str:
     """Human-friendly slug used for history keys and backups."""
     if chat_type in ("group", "supergroup", "channel"):
         return f"tg-group-{str(chat_id).lstrip('-')}"
@@ -755,11 +998,13 @@ def add_feedback(text: str, username: str | None = None) -> None:
     if redis is None:
         return
     try:
-        payload = json.dumps({
-            "text": text,
-            "username": username,
-            "ts": int(time.time()),
-        })
+        payload = json.dumps(
+            {
+                "text": text,
+                "username": username,
+                "ts": int(time.time()),
+            }
+        )
         redis.rpush(K_FEEDBACK, payload)
         redis.ltrim(K_FEEDBACK, -FEEDBACK_CAP, -1)
     except Exception as e:

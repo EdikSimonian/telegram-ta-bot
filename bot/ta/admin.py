@@ -3,6 +3,7 @@
 Every inbound Telegram text update flows through ``route(message)``.
 Actions live in sibling modules; this file is pure dispatch.
 """
+
 from __future__ import annotations
 
 import traceback
@@ -73,6 +74,7 @@ def route(message) -> None:
     if p.is_command and p.command == "start":
         if p.is_dm:
             from bot.clients import bot as _bot
+
             _bot.send_message(p.chat_id, welcome.DM_WELCOME)
             # Consume the once-gate so the next non-command DM doesn't
             # re-send the welcome. /start always sends; the gate only
@@ -80,6 +82,7 @@ def route(message) -> None:
             mark_dm_welcomed(p.user_id)
         else:
             from bot.clients import bot as _bot
+
             _bot.send_message(p.chat_id, welcome.GROUP_WELCOME)
             delete_message(p.chat_id, p.message.message_id)
         return
@@ -110,6 +113,7 @@ def route(message) -> None:
         else:
             # Students: store the feedback text.
             from bot.ta.state import add_feedback
+
             text = (p.command_args or "").strip()
             if not text:
                 send_message(p.user_id, "Usage: /feedback <text>")
@@ -162,14 +166,95 @@ def route(message) -> None:
             if ta_rate_should_notify(p.user_id):
                 send_message(
                     p.chat_id,
-                    f"\u26A0\uFE0F You've hit the rate limit of {TA_RATE_LIMIT} "
+                    f"\u26a0\ufe0f You've hit the rate limit of {TA_RATE_LIMIT} "
                     f"questions per hour. Try again later.",
                 )
+            return
+
+    # 11b. Pre-gate: plain group chatter that doesn't look like a question
+    #      shouldn't pay for an embedding + chat completion just for the
+    #      model to return IGNORE. Addressed messages (DM, mention,
+    #      reply-to-bot) and admin messages always pass through.
+    addressed = p.is_dm or p.is_mention or p.is_reply_to_bot
+    if not addressed and not p.is_admin:
+        if not _looks_like_question(p.stripped_text or p.text or ""):
             return
 
     # 12. Otherwise: RAG + LLM. Delegated to the Q&A handler which Stage 5
     #     will replace with the RAG-enabled version.
     _answer_question(p)
+
+
+# Question-mark glyphs across the languages the workshop uses (English /
+# Russian / Armenian). Matched anywhere in the message.
+_QUESTION_MARKS = ("?", "\u055e", "\u061f")
+
+# Words that, when they're the first token of a message, strongly suggest
+# the user is asking a question even when no "?" is present. Conservative
+# (no "do/does/has/have/was/were") to keep statement false-positives low.
+_INTERROGATIVE_STARTERS = {
+    # English
+    "what",
+    "who",
+    "why",
+    "when",
+    "where",
+    "how",
+    "which",
+    "can",
+    "could",
+    "should",
+    "would",
+    "will",
+    "is",
+    "are",
+    # Russian
+    "\u0447\u0442\u043e",
+    "\u043a\u0442\u043e",
+    "\u043f\u043e\u0447\u0435\u043c\u0443",
+    "\u0437\u0430\u0447\u0435\u043c",
+    "\u043a\u043e\u0433\u0434\u0430",
+    "\u0433\u0434\u0435",
+    "\u043a\u0430\u043a",
+    "\u043a\u0430\u043a\u043e\u0439",
+    "\u043a\u0430\u043a\u0430\u044f",
+    "\u043a\u0430\u043a\u043e\u0435",
+    "\u043a\u0430\u043a\u0438\u0435",
+    "\u043c\u043e\u0436\u043d\u043e",
+    # Armenian
+    "\u056b\u0576\u0579",
+    "\u0578\u057e",
+    "\u056b\u0576\u0579\u0578\u0582",
+    "\u0565\u0580\u0562",
+    "\u0578\u0580\u057f\u0565\u0572",
+    "\u056b\u0576\u0579\u057a\u0565\u057d",
+    "\u0578\u0580",
+}
+
+# Below this length a non-question is almost always chatter ("lol", "thanks",
+# emoji-only). Above it the message has enough substance to be worth
+# spending an LLM call on even without an explicit "?".
+_QUESTION_MIN_LEN = 50
+
+_TRIM_CHARS = ".,!:;()[]{}'\"\u055e\u061f"
+
+
+def _looks_like_question(text: str) -> bool:
+    """Cheap heuristic for "is this likely a question worth answering?"
+
+    Three signals, any one is enough: a "?" anywhere, a first token in
+    ``_INTERROGATIVE_STARTERS``, or length \u2265 50 chars. Mistakes here are
+    recoverable: students can re-ask with a "?" or @-mention the bot.
+    """
+    s = (text or "").strip()
+    if not s:
+        return False
+    if any(q in s for q in _QUESTION_MARKS):
+        return True
+    first = s.split(maxsplit=1)[0].lower().strip(_TRIM_CHARS)
+    if first in _INTERROGATIVE_STARTERS:
+        return True
+    return len(s) >= _QUESTION_MIN_LEN
 
 
 _STUDENT_GROUP_WAIT_SECONDS = 3
@@ -193,6 +278,7 @@ def _answer_question(p: Prepared) -> None:
     # human can reply first. Skip for direct addresses + admins.
     if not addressed and not p.is_admin:
         import time
+
         time.sleep(_STUDENT_GROUP_WAIT_SECONDS)
 
     try:

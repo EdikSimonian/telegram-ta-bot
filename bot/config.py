@@ -1,14 +1,14 @@
 import os
 
 # ── Telegram ──────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-WEBHOOK_SECRET  = os.environ.get("WEBHOOK_SECRET", "").strip()
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 
 # ── LLM provider (OpenAI-compatible) ──────────────────────────────────────
-AI_API_KEY  = os.environ["AI_API_KEY"].strip()
+AI_API_KEY = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.openai.com/v1").strip()
-MODEL       = os.environ.get("AI_MODEL", "gpt-5.4-nano").strip()
-QUIZ_MODEL  = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
+MODEL = os.environ.get("AI_MODEL", "gpt-5.4-nano").strip()
+QUIZ_MODEL = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
 
 # Models the /model admin command will accept. Kept tight on purpose:
 # this deployment targets OpenAI direct, and invalid model IDs just cause
@@ -22,11 +22,11 @@ DEFAULT_MODEL = MODEL
 
 # ── HF provider (legacy fallback; usually unset for TA bot) ───────────────
 HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()
-HF_TOKEN    = os.environ.get("HF_TOKEN", "").strip()
+HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
 DEFAULT_PROVIDER = "main"
 
 # ── Upstash Redis (required for TA bot — stateful) ────────────────────────
-UPSTASH_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip()
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip()
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip()
 # Prefix prepended to every Redis key. Lets one shared Upstash Redis DB
 # host multiple bots (prod + test) without key collisions. Default "ta:"
@@ -36,7 +36,7 @@ _raw_redis_prefix = os.environ.get("REDIS_PREFIX", "ta:").strip()
 REDIS_PREFIX = (_raw_redis_prefix.rstrip(":") + ":") if _raw_redis_prefix else "ta:"
 
 # ── Upstash Vector (RAG) ──────────────────────────────────────────────────
-UPSTASH_VECTOR_URL   = os.environ.get("UPSTASH_VECTOR_REST_URL", "").strip()
+UPSTASH_VECTOR_URL = os.environ.get("UPSTASH_VECTOR_REST_URL", "").strip()
 UPSTASH_VECTOR_TOKEN = os.environ.get("UPSTASH_VECTOR_REST_TOKEN", "").strip()
 # Upstash Vector has first-class namespaces: one index can host many
 # isolated corpora. Blank = default namespace. Use "prod" / "test" when
@@ -47,10 +47,12 @@ VECTOR_NAMESPACE = os.environ.get("VECTOR_NAMESPACE", "").strip()
 # Upstash exposes a generic endpoint and region-scoped endpoints (e.g.
 # https://qstash-us-east-1.upstash.io). Override via QSTASH_URL when the
 # console gives you a regional URL — keeps publish latency low.
-QSTASH_URL                 = os.environ.get("QSTASH_URL", "https://qstash.upstash.io").strip().rstrip("/")
-QSTASH_TOKEN               = os.environ.get("QSTASH_TOKEN", "").strip()
+QSTASH_URL = (
+    os.environ.get("QSTASH_URL", "https://qstash.upstash.io").strip().rstrip("/")
+)
+QSTASH_TOKEN = os.environ.get("QSTASH_TOKEN", "").strip()
 QSTASH_CURRENT_SIGNING_KEY = os.environ.get("QSTASH_CURRENT_SIGNING_KEY", "").strip()
-QSTASH_NEXT_SIGNING_KEY    = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "").strip()
+QSTASH_NEXT_SIGNING_KEY = os.environ.get("QSTASH_NEXT_SIGNING_KEY", "").strip()
 
 # ── GitHub ────────────────────────────────────────────────────────────────
 # Optional PAT for private repos or to avoid 60-req/hour unauthenticated
@@ -62,7 +64,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 # EdikSimonian/telegram-ta-bot repo. The /upgrade command (instructor only)
 # fires this routine with the instruction text; the routine edits the code,
 # writes tests, and opens a PR against the test branch.
-CLAUDE_ROUTINE_ID    = os.environ.get("CLAUDE_ROUTINE_ID", "").strip()
+CLAUDE_ROUTINE_ID = os.environ.get("CLAUDE_ROUTINE_ID", "").strip()
 CLAUDE_ROUTINE_TOKEN = os.environ.get("CLAUDE_ROUTINE_TOKEN", "").strip()
 # Shared secret configured on every GitHub webhook that posts to us. The
 # webhook endpoint verifies X-Hub-Signature-256 against this — unsigned
@@ -78,7 +80,7 @@ BLOB_PATH_PREFIX = (_raw_prefix.rstrip("/") + "/") if _raw_prefix else "docs/"
 
 # ── Embeddings ────────────────────────────────────────────────────────────
 EMBEDDINGS_PROVIDER = os.environ.get("EMBEDDINGS_PROVIDER", "openai").strip().lower()
-EMBEDDINGS_MODEL    = os.environ.get("EMBEDDINGS_MODEL", "text-embedding-3-small").strip()
+EMBEDDINGS_MODEL = os.environ.get("EMBEDDINGS_MODEL", "text-embedding-3-small").strip()
 
 # ── Search (optional) ─────────────────────────────────────────────────────
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
@@ -89,6 +91,8 @@ TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
 # without a scheme.
 PROD_URL = os.environ.get("PROD_URL", "").strip()
 _vercel_url = os.environ.get("VERCEL_URL", "").strip()
+
+
 def _normalize_public_url(raw: str) -> str:
     raw = raw.strip().rstrip("/")
     if not raw:
@@ -96,6 +100,7 @@ def _normalize_public_url(raw: str) -> str:
     if raw.startswith("http://") or raw.startswith("https://"):
         return raw
     return f"https://{raw}"
+
 
 PUBLIC_URL = _normalize_public_url(PROD_URL) or _normalize_public_url(_vercel_url)
 
@@ -105,11 +110,26 @@ PUBLIC_URL = _normalize_public_url(PROD_URL) or _normalize_public_url(_vercel_ur
 BOT_ENV = os.environ.get("BOT_ENV", "").strip().lower() or "local"
 
 PERMANENT_ADMIN = os.environ.get("PERMANENT_ADMIN", "ediksimonian").strip().lower()
+
+
+# Numeric Telegram user ID for the permanent admin. STRONGLY recommended:
+# Telegram usernames are mutable and can be recycled to a new account 30
+# days after release, so a username-only gate could hand `/upgrade` to a
+# stranger. When set, this overrides the username-based instructor check.
+# Find your ID by DMing @userinfobot on Telegram.
+def _parse_admin_id(raw: str) -> int:
+    raw = (raw or "").strip()
+    if not raw or not raw.lstrip("-").isdigit():
+        return 0
+    return int(raw)
+
+
+PERMANENT_ADMIN_ID = _parse_admin_id(os.environ.get("PERMANENT_ADMIN_ID", ""))
 # Human-readable instructor name for welcome messages + system prompt.
 INSTRUCTOR_NAME = os.environ.get("INSTRUCTOR_NAME", "Edik Simonian").strip()
 
 # TA bot: per-student questions in a rolling window (student-facing limit).
-TA_RATE_LIMIT        = int(os.environ.get("TA_RATE_LIMIT", "10"))
+TA_RATE_LIMIT = int(os.environ.get("TA_RATE_LIMIT", "10"))
 TA_RATE_LIMIT_WINDOW = int(os.environ.get("TA_RATE_LIMIT_WINDOW", "3600"))
 
 # Legacy hard daily cap (kept for the original polling runner).
@@ -135,7 +155,7 @@ SYSTEM_PROMPT = (
     "single word: IGNORE\n\n"
     "Reply IGNORE when:\n"
     "- Greetings, small talk, or chatter between students "
-    "(\"hi Jack\", \"good morning\", \"thanks!\", \"lol\", reactions, emoji-only)\n"
+    '("hi Jack", "good morning", "thanks!", "lol", reactions, emoji-only)\n'
     "- Messages addressed to another student by name\n"
     "- Off-topic content unrelated to programming, AI/ML, the course material, "
     "  or workshop logistics\n"
@@ -163,13 +183,13 @@ SYSTEM_PROMPT = (
     "No HTML unless asked.\n"
     "Language: match the student's language. If they write in Armenian, reply in Armenian. If in Russian, reply in Russian. Default to English."
 )
-MAX_HISTORY   = 20
-HISTORY_TTL   = 2592000   # 30 days
-MAX_MSG_LEN   = 4096
-TG_CHUNK_LEN  = 4000      # safety margin under Telegram's 4096 limit
+MAX_HISTORY = 20
+HISTORY_TTL = 2592000  # 30 days
+MAX_MSG_LEN = 4096
+TG_CHUNK_LEN = 4000  # safety margin under Telegram's 4096 limit
 
 # RAG knobs
-RAG_CHUNK_SIZE     = 800
-RAG_CHUNK_OVERLAP  = 100
-RAG_TOP_K          = 5
-RAG_MIN_SCORE      = 0.6
+RAG_CHUNK_SIZE = 800
+RAG_CHUNK_OVERLAP = 100
+RAG_TOP_K = 5
+RAG_MIN_SCORE = 0.6

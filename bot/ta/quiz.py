@@ -9,6 +9,7 @@ Flow:
     QStash callback     → api/autoreveal.py → reveal_now
     inline fallback     → router checks expiry on every incoming message
 """
+
 from __future__ import annotations
 
 import html as _html
@@ -29,8 +30,10 @@ from bot.ta.state import (
     bump_total_quizzes,
     clear_active_quiz,
     get_active_quiz,
+    get_quiz_answers,
     get_quiz_history,
     push_quiz_history,
+    record_quiz_answer,
     record_quiz_score,
     set_active_quiz,
     update_streak,
@@ -142,6 +145,7 @@ def _schedule_autoreveal(chat_id: int | str) -> bool:
         return False
     callback = f"{PUBLIC_URL}/api/autoreveal"
     from bot.ta.state import get_active_quiz as _get_aq
+
     active = _get_aq(chat_id)
     q_msg_id = active.get("questionMessageId") if active else None
     msg_id = qstash.publish(
@@ -174,13 +178,16 @@ def start_quiz(p: Prepared, topic: str, chat_id: int | str) -> None:
         send_message(p.user_id, "Telegram rejected the quiz message.")
         return
 
-    set_active_quiz(chat_id, {
-        "questionMessageId": msg_id,
-        "correctAnswer":     correct,
-        "topic":             topic,
-        "answers":           {},
-        "startTime":         int(time.time()),
-    })
+    set_active_quiz(
+        chat_id,
+        {
+            "questionMessageId": msg_id,
+            "correctAnswer": correct,
+            "topic": topic,
+            "answers": {},
+            "startTime": int(time.time()),
+        },
+    )
     push_quiz_history(p.group_key, _first_line(raw))
     bump_total_quizzes(p.group_key)
 
@@ -210,19 +217,25 @@ def is_active_quiz_in(chat_id: int | str) -> bool:
 
 
 def record_answer(p: Prepared, letter: str) -> None:
-    """Record a student's answer (overwrites any previous). React 👍."""
-    active = get_active_quiz(p.chat_id)
-    if active is None:
+    """Record a student's answer (overwrites any previous). React 🫡.
+
+    Atomic: one HSET per student into the quiz answers hash. Concurrent
+    answers from different students no longer race via read-modify-write
+    on a shared dict — the previous flow could drop one answer when two
+    students replied in the same Vercel invocation tick.
+    """
+    if get_active_quiz(p.chat_id) is None:
         return
-    answers = dict(active.get("answers") or {})
-    answers[str(p.user_id)] = {
-        "letter":    letter,
-        "username":  p.username,
-        "firstName": p.first_name,
-        "ts":        int(time.time()),
-    }
-    active["answers"] = answers
-    set_active_quiz(p.chat_id, active)
+    record_quiz_answer(
+        p.chat_id,
+        p.user_id,
+        {
+            "letter": letter,
+            "username": p.username,
+            "firstName": p.first_name,
+            "ts": int(time.time()),
+        },
+    )
     set_reaction(p.chat_id, p.message.message_id, "🫡")
 
 
@@ -247,7 +260,10 @@ def reveal_now(chat_id: int | str) -> bool:
     if not active:
         return False
     correct = active.get("correctAnswer") or ""
-    answers: dict = active.get("answers") or {}
+    # Merge: new HSET-based store + any legacy in-dict answers from quizzes
+    # that were active at deploy time. The hash wins on user_id collisions.
+    answers: dict = dict(active.get("answers") or {})
+    answers.update(get_quiz_answers(chat_id))
     group_key = str(chat_id)
 
     right: list[str] = []
@@ -258,7 +274,10 @@ def reveal_now(chat_id: int | str) -> bool:
         name = _html.escape(raw_name)
         is_right = letter == correct.upper()
         record_quiz_score(
-            group_key, uid, data.get("username"), data.get("firstName"),
+            group_key,
+            uid,
+            data.get("username"),
+            data.get("firstName"),
             correct=is_right,
         )
         streak = update_streak(group_key, uid, is_right)
