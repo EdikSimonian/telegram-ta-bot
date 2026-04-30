@@ -14,6 +14,9 @@ QUIZ_MODEL = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
 # this deployment targets OpenAI direct, and invalid model IDs just cause
 # 404s at request time. Extend when you add a second provider.
 VALID_MODELS = [
+    "gpt-5.5-nano",
+    "gpt-5.5-mini",
+    "gpt-5.5",
     "gpt-5.4-nano",
     "gpt-5.4-mini",
     "gpt-5.4",
