@@ -75,14 +75,20 @@ def strip_answer_line(text: str) -> str:
 
 
 def format_question_for_display(raw: str) -> str:
-    """Clean + decorate the LLM output for posting in the group."""
+    """Clean + decorate the LLM output for posting in the group.
+
+    The LLM output is treated as plain text and HTML-escaped before being
+    folded into our HTML wrapper. Without escaping, common Python answers
+    (``<class 'int'>``, ``list<int>``, ``i < n``) make Telegram return
+    400 "can't parse entities" and the whole quiz silently fails.
+    """
     body = strip_answer_line(raw).strip()
     body = re.sub(r"^QUESTION:\s*", "", body, flags=re.IGNORECASE)
     # Guarantee each option starts on its own line.
     body = re.sub(r"\s*\n?([A-D])\)", r"\n\1)", body).lstrip("\n")
     return (
         "✨✨✨ <b>QUIZ TIME!</b> ✨✨✨\n\n"
-        f"{body}\n\n"
+        f"{_html.escape(body)}\n\n"
         f"⏰ <i>Reply with A, B, C, or D — you have {QUIZ_TIMEOUT_MINUTES} minutes!</i>"
     )
 

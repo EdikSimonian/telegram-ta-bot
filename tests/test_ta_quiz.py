@@ -98,6 +98,26 @@ def test_format_question_strips_answer_and_adds_newlines():
     assert "\nD)" in out
 
 
+def test_format_question_escapes_html_entities_in_body():
+    """Common python answers contain <, >, & — without escaping, Telegram
+    rejects the whole message with 'can't parse entities'."""
+    raw = (
+        "QUESTION: Which prints `<class 'int'>` for x = 5?\n"
+        "A) type(x)\n"
+        "B) print(x)\n"
+        "C) x.dtype\n"
+        "D) typeof(x)\n"
+        "ANSWER: A"
+    )
+    from bot.ta.quiz import format_question_for_display
+
+    out = format_question_for_display(raw)
+    # The body's < > should be escaped into entities; our wrapper tags stay literal.
+    assert "&lt;class" in out
+    assert "&#x27;int&#x27;&gt;" in out or "&#39;int&#39;&gt;" in out
+    assert "<b>QUIZ TIME!</b>" in out  # wrapper tags untouched
+
+
 # ── maybe_single_letter ───────────────────────────────────────────────────
 def test_single_letter_detection():
     from bot.ta.quiz import maybe_single_letter
