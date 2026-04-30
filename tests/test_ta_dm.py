@@ -266,7 +266,7 @@ def test_ai_answer_logs_dm_turns():
          patch("bot.ai.rag.format_context", return_value=None), \
          patch("bot.ai.get_history", return_value=[]), \
          patch("bot.ai.get_last_group_qa", return_value=None), \
-         patch("bot.ai.get_active_model", return_value="gpt-5.5-nano"), \
+         patch("bot.ai.get_active_model", return_value="gpt-5.4-nano"), \
          patch("bot.ai.append_history"), \
          patch("bot.ai.save_last_group_qa"), \
          patch("bot.ai.guardrail.clean", return_value="reply"), \

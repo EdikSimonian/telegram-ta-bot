@@ -7,15 +7,16 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 # ── LLM provider (OpenAI-compatible) ──────────────────────────────────────
 AI_API_KEY = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.openai.com/v1").strip()
-MODEL = os.environ.get("AI_MODEL", "gpt-5.5-nano").strip()
+MODEL = os.environ.get("AI_MODEL", "gpt-5.4-nano").strip()
 QUIZ_MODEL = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
 
 # Models the /model admin command will accept. Kept tight on purpose:
 # this deployment targets OpenAI direct, and invalid model IDs just cause
 # 404s at request time. Extend when you add a second provider.
 VALID_MODELS = [
-    "gpt-5.5-nano",
-    "gpt-5.5-mini",
+    # mini and nano stay on 5.4 — OpenAI shipped 5.5 only as the flagship.
+    "gpt-5.4-nano",
+    "gpt-5.4-mini",
     "gpt-5.5",
 ]
 DEFAULT_MODEL = MODEL
