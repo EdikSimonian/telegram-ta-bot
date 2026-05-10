@@ -143,6 +143,18 @@ def _maybe_search_block(question: str, has_rag_hits: bool) -> str | None:
         return None
 
 
+def _dm_fallback_reply(question: str, p: Prepared) -> str:
+    """Last-resort DM response when the model emits IGNORE/empty/hedged text."""
+    if getattr(p, "is_instructor", False):
+        return "I'm here. Send me what you want to check or change."
+    if question.strip().endswith(("?", "՞", "؟")):
+        return (
+            "I don't have enough context to answer that confidently yet. "
+            "Send me a little more detail, or mention the exact course topic."
+        )
+    return "I'm here. Send me a course question or a follow-up from the group."
+
+
 def answer(p: Prepared) -> str | None:
     """Produce a reply for the prepared message, or None if we shouldn't reply.
 
@@ -165,6 +177,18 @@ def answer(p: Prepared) -> str | None:
     messages: list[dict] = [{"role": "system", "content": system_msg}]
     if extra_system:
         messages.append({"role": "system", "content": extra_system})
+    if p.is_dm:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "This is a private DM. Always send a useful reply in DMs "
+                    "for both students and the instructor. Never output IGNORE "
+                    "in a DM. For greetings or unclear messages, reply briefly "
+                    "and invite the user to send the question or follow-up."
+                ),
+            }
+        )
 
     # In DMs: inject the student's last group Q&A as context so follow-ups
     # work without the student having to re-state the question.
@@ -213,7 +237,9 @@ def answer(p: Prepared) -> str | None:
     #     (we don't want "IGNORE" polluting the context).
     reply = guardrail.clean(raw_reply)
     if not reply:
-        return None
+        if not p.is_dm:
+            return None
+        reply = _dm_fallback_reply(raw, p)
 
     # 4. Persist — group-level history so the whole class shares context.
     append_history(p.group_key, "user", user_payload, limit=MAX_HISTORY)

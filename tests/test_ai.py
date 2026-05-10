@@ -9,6 +9,7 @@ def _prepared(
     group_key="-100123",
     is_dm=False,
     is_mention=False,
+    is_instructor=False,
 ):
     p = MagicMock()
     p.stripped_text = stripped_text
@@ -18,7 +19,7 @@ def _prepared(
     p.is_dm = is_dm
     p.is_mention = is_mention
     p.is_reply_to_bot = False
-    p.is_instructor = False
+    p.is_instructor = is_instructor
     p.mentions_other_user = False
     p.reply_to_username = None
     return p
@@ -593,6 +594,80 @@ def test_answer_ignore_marker_survives_trailer_extraction():
         out = answer(_prepared())
         assert out is None
         ah.assert_not_called()
+
+
+def test_answer_dm_never_silently_ignores_model_ignore():
+    captured_history = []
+    captured_dm = []
+
+    def _capture_history(group_key, role, content, **kw):
+        captured_history.append((role, content))
+
+    def _capture_dm(user_id, role, content, **kw):
+        captured_dm.append((role, content))
+
+    with (
+        patch("bot.ai.rag.retrieve", return_value=[]),
+        patch("bot.ai.get_history", return_value=[]),
+        patch("bot.ai.append_history", side_effect=_capture_history),
+        patch("bot.ai.append_dm_log", side_effect=_capture_dm),
+        patch("bot.ai.get_last_group_qa", return_value=None),
+        patch("bot.ai.get_active_model", return_value=None),
+        patch("bot.ai.ai") as client,
+    ):
+        client.chat.completions.create.return_value = _mock_ai_response("IGNORE")
+        from bot.ai import answer
+
+        out = answer(_prepared(stripped_text="hi", is_dm=True))
+        assert out == "I&#x27;m here. Send me a course question or a follow-up from the group."
+        assert captured_history == [
+            ("user", "[DIRECT]: [DM]: hi"),
+            ("assistant", "I'm here. Send me a course question or a follow-up from the group."),
+        ]
+        assert captured_dm == [
+            ("user", "hi"),
+            ("assistant", "I'm here. Send me a course question or a follow-up from the group."),
+        ]
+
+
+def test_answer_dm_instructor_ignore_gets_instructor_fallback():
+    with (
+        patch("bot.ai.rag.retrieve", return_value=[]),
+        patch("bot.ai.get_history", return_value=[]),
+        patch("bot.ai.append_history"),
+        patch("bot.ai.append_dm_log"),
+        patch("bot.ai.get_last_group_qa", return_value=None),
+        patch("bot.ai.get_active_model", return_value=None),
+        patch("bot.ai.ai") as client,
+    ):
+        client.chat.completions.create.return_value = _mock_ai_response("IGNORE")
+        from bot.ai import answer
+
+        out = answer(_prepared(stripped_text="done", is_dm=True, is_instructor=True))
+        assert out == "I&#x27;m here. Send me what you want to check or change."
+
+
+def test_answer_dm_adds_never_ignore_system_instruction():
+    with (
+        patch("bot.ai.rag.retrieve", return_value=[]),
+        patch("bot.ai.get_history", return_value=[]),
+        patch("bot.ai.append_history"),
+        patch("bot.ai.append_dm_log"),
+        patch("bot.ai.get_last_group_qa", return_value=None),
+        patch("bot.ai.get_active_model", return_value=None),
+        patch("bot.ai.ai") as client,
+    ):
+        client.chat.completions.create.return_value = _mock_ai_response("hello")
+        from bot.ai import answer
+
+        answer(_prepared(stripped_text="hi", is_dm=True))
+        messages = client.chat.completions.create.call_args.kwargs["messages"]
+        assert any(
+            m["role"] == "system"
+            and "Always send a useful reply in DMs" in m["content"]
+            and "Never output IGNORE" in m["content"]
+            for m in messages
+        )
 
 
 def test_answer_persists_clean_reply_without_trailer():
