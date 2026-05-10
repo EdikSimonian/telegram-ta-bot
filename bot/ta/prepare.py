@@ -5,13 +5,14 @@ rather than poking at the raw telebot message. Keeps downstream code
 testable and stops subtle bugs where a field exists only sometimes
 (``reply_to_message``, ``entities``, etc.).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
 from bot.clients import BOT_INFO
-from bot.config import PERMANENT_ADMIN
+from bot.config import PERMANENT_ADMIN, PERMANENT_ADMIN_ID
 from bot.ta import state as _state
 from bot.ta.state import resolve_group_key, thread_slug
 
@@ -20,22 +21,22 @@ from bot.ta.state import resolve_group_key, thread_slug
 class Prepared:
     message: Any
     chat_id: int | str
-    chat_type: str            # "private" | "group" | "supergroup" | "channel"
+    chat_type: str  # "private" | "group" | "supergroup" | "channel"
     user_id: int
-    username: str | None      # lowercase, no "@"
+    username: str | None  # lowercase, no "@"
     first_name: str | None
-    text: str                 # original text, untouched
-    stripped_text: str        # text with bot mention removed, trimmed
+    text: str  # original text, untouched
+    stripped_text: str  # text with bot mention removed, trimmed
     is_dm: bool
-    is_mention: bool          # bot was @-mentioned in this message
+    is_mention: bool  # bot was @-mentioned in this message
     is_command: bool
-    command: str | None       # lowercased, no leading slash
-    command_args: str         # everything after the command word
+    command: str | None  # lowercased, no leading slash
+    command_args: str  # everything after the command word
     is_reply_to_bot: bool
     reply_to_username: str | None
     mentions_other_user: bool  # any @-mention that isn't the bot
     is_admin: bool
-    is_instructor: bool       # sender == PERMANENT_ADMIN
+    is_instructor: bool  # sender == PERMANENT_ADMIN
     group_key: str
     thread_slug: str
 
@@ -45,7 +46,11 @@ def _strip_mention(text: str, bot_username: str | None) -> str:
         return ""
     if not bot_username:
         return text.strip()
-    return text.replace(f"@{bot_username}", "").replace(f"@{bot_username.lower()}", "").strip()
+    return (
+        text.replace(f"@{bot_username}", "")
+        .replace(f"@{bot_username.lower()}", "")
+        .strip()
+    )
 
 
 def _parse_command(text: str, bot_username: str | None) -> tuple[bool, str | None, str]:
@@ -107,15 +112,25 @@ def prepare(message) -> Prepared:
             reply_uname = getattr(reply_user, "username", None)
             if reply_uname:
                 reply_to_username = reply_uname.lower()
-            if bot_username and reply_uname and reply_uname.lower() == bot_username.lower():
+            if (
+                bot_username
+                and reply_uname
+                and reply_uname.lower() == bot_username.lower()
+            ):
                 is_reply_to_bot = True
 
     is_command, command, command_args = _parse_command(text, bot_username)
     stripped = _strip_mention(text, bot_username)
 
     # Look up via the module so tests patching bot.ta.state.is_admin take effect.
-    is_admin_flag    = _state.is_admin(username)
-    is_instructor    = (username or "") == PERMANENT_ADMIN
+    # ID-based check is primary (immune to Telegram username recycling); the
+    # legacy username path stays as fallback for existing prod data and for
+    # the deployments that haven't set PERMANENT_ADMIN_ID yet.
+    is_admin_flag = _state.is_admin_id(user_id) or _state.is_admin(username)
+    if PERMANENT_ADMIN_ID:
+        is_instructor = user_id == PERMANENT_ADMIN_ID
+    else:
+        is_instructor = (username or "") == PERMANENT_ADMIN
 
     return Prepared(
         message=message,
@@ -151,11 +166,7 @@ def prompt_prefix(p: Prepared) -> str:
         parts.append(f"[INSTRUCTOR @{PERMANENT_ADMIN}]:")
     if p.is_mention or p.is_dm:
         parts.append("[DIRECT]:")
-    if (
-        p.reply_to_username
-        and not p.is_reply_to_bot
-        and not p.is_mention
-    ):
+    if p.reply_to_username and not p.is_reply_to_bot and not p.is_mention:
         parts.append(f"[REPLY_TO @{p.reply_to_username}]:")
     if p.is_dm:
         parts.append("[DM]:")

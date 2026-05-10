@@ -1,10 +1,11 @@
 import hmac
+import traceback
 
 import telebot
 from flask import Flask, jsonify, request
 import bot.handlers  # registers all handlers with the bot
 from bot.clients import bot
-from bot.config import PERMANENT_ADMIN, WEBHOOK_SECRET
+from bot.config import BOT_ENV, PERMANENT_ADMIN, WEBHOOK_SECRET
 from bot.deploy_notice import notify_once
 from bot.ta.state import get_user_chat
 
@@ -20,13 +21,25 @@ def health():
 
 @app.route("/api/webhook", methods=["POST"])
 def webhook():
-    if WEBHOOK_SECRET:
+    # Fail-closed in any non-local environment. Previously we accepted
+    # unauthenticated webhooks when WEBHOOK_SECRET was unset; that turned
+    # a single-env-var misconfiguration into open exposure of the bot to
+    # spoofed updates. Local dev still allows it for run_local.py /
+    # ngrok-style flows where setting a secret is friction without value.
+    if not WEBHOOK_SECRET:
+        if BOT_ENV != "local":
+            return "Webhook secret not configured", 500
+        # Local: fall through, no header check.
+    else:
         token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not hmac.compare_digest(token, WEBHOOK_SECRET):
             return "Forbidden", 403
     notify_once()
     update = telebot.types.Update.de_json(request.get_data(as_text=True))
-    bot.process_new_updates([update])
+    try:
+        bot.process_new_updates([update])
+    except Exception:
+        traceback.print_exc()
     return "OK", 200
 
 

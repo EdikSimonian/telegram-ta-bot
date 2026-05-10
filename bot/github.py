@@ -10,6 +10,7 @@ content we index is almost all markdown / notebooks / small source files.
 Auth is optional: anonymous requests get 60/hour, authed get 5000/hour
 (GITHUB_TOKEN env).
 """
+
 from __future__ import annotations
 
 import base64
@@ -25,12 +26,35 @@ GH_API = "https://api.github.com"
 
 # Extensions we actually try to embed. Anything else is ignored.
 _TEXT_EXTENSIONS = {
-    ".md", ".mdx", ".markdown", ".rst", ".txt",
-    ".py", ".ipynb", ".ts", ".tsx", ".js", ".jsx",
-    ".json", ".yaml", ".yml", ".toml",
-    ".html", ".css",
-    ".go", ".rs", ".java", ".rb", ".swift", ".kt", ".c", ".cpp", ".h",
-    ".sh", ".bash", ".zsh",
+    ".md",
+    ".mdx",
+    ".markdown",
+    ".rst",
+    ".txt",
+    ".py",
+    ".ipynb",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".html",
+    ".css",
+    ".go",
+    ".rs",
+    ".java",
+    ".rb",
+    ".swift",
+    ".kt",
+    ".c",
+    ".cpp",
+    ".h",
+    ".sh",
+    ".bash",
+    ".zsh",
     ".sql",
 }
 
@@ -39,7 +63,9 @@ _TEXT_EXTENSIONS = {
 _URL_RE = re.compile(
     r"^(?:https?://github\.com/)?"
     r"(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+?)(?:\.git)?"
-    r"(?:/tree/(?P<branch>[^/\s]+))?"
+    # Branch name allows slashes (e.g. "feature/foo", "release/2025-q4");
+    # non-greedy so the trailing /?$ can still consume an optional slash.
+    r"(?:/tree/(?P<branch>[^\s#]+?))?"
     r"/?$"
 )
 
@@ -112,11 +138,13 @@ def list_tree(owner: str, repo: str, ref: str) -> list[dict]:
             continue
         if not _has_text_extension(path):
             continue
-        out.append({
-            "path": path,
-            "sha":  entry.get("sha", ""),
-            "size": size,
-        })
+        out.append(
+            {
+                "path": path,
+                "sha": entry.get("sha", ""),
+                "size": size,
+            }
+        )
     return out
 
 

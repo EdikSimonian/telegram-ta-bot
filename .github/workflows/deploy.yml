@@ -10,10 +10,10 @@ concurrency:
 
 jobs:
   test:
-    # Skip when the head commit was already tested by pr-review.yml —
-    # auto-merge stamps "[pr-tested]" into the squash commit body so
-    # we don't run the same suite twice.
-    if: ${{ !contains(github.event.head_commit.message, '[pr-tested]') }}
+    # Always run before deploy. We previously skipped on a "[pr-tested]"
+    # commit-message marker that pr-review.yml stamped, but anyone with
+    # merge rights could set that string and bypass the gate. The marginal
+    # CI cost of a second run is trivial vs the security risk.
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -27,9 +27,9 @@ jobs:
 
   deploy:
     needs: test
-    # Run after `test` succeeds OR when it was skipped (pre-tested by
-    # pr-review.yml). Still blocks on actual test failure.
-    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    # Tests must succeed. (Previously this also accepted "skipped" when
+    # the [pr-tested] marker was present; that bypass was removed.)
+    if: ${{ needs.test.result == 'success' }}
     runs-on: ubuntu-latest
     environment: ${{ github.ref_name == 'main' && 'production' || 'test' }}
     env:

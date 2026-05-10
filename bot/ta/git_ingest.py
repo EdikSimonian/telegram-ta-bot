@@ -13,8 +13,10 @@ Two ingest paths:
                          file lands in its own ~2s function call. Required
                          for repos big enough to bust Vercel's 60s cap.
 """
+
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Iterable
 
@@ -26,15 +28,33 @@ from bot.ta.state import (
     add_git_repo,
     get_git_repo,
     list_docs,
-    list_git_repos,
     remove_doc,
     remove_git_repo,
 )
 
 
+_SLUG_MAX_LEN = 120
+_SLUG_HASH_LEN = 8  # 8 hex chars = 32 bits, plenty to disambiguate within a repo
+
+
 def _slug(owner: str, repo: str, path: str) -> str:
-    base = f"gh-{owner}-{repo}-{rag.slugify(path)}"
-    return base[:120]
+    """Build a Vector-friendly slug for ``owner/repo @ path``.
+
+    For paths short enough that the slug would not be truncated, the result
+    is identical to the legacy formula — backward compatible with existing
+    Redis doc entries. Long paths get a stable hash suffix so two distinct
+    paths sharing a 110-char prefix can no longer collapse into the same
+    slug (which would orphan the first one's vectors on re-ingest).
+    """
+    prefix = f"gh-{owner}-{repo}-"
+    path_part = rag.slugify(path)
+    full = prefix + path_part
+    if len(full) <= _SLUG_MAX_LEN:
+        return full
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:_SLUG_HASH_LEN]
+    suffix = f"-{digest}"
+    budget = _SLUG_MAX_LEN - len(prefix) - len(suffix)
+    return prefix + path_part[:budget] + suffix
 
 
 def _doc_title(owner: str, repo: str, path: str) -> str:
@@ -58,8 +78,12 @@ def sync_repo(
     """
     branch = ref or github.default_branch(owner, repo)
     if not branch:
-        return {"ok": False, "reason": "could not resolve default branch",
-                "files_added": 0, "files_skipped": 0}
+        return {
+            "ok": False,
+            "reason": "could not resolve default branch",
+            "files_added": 0,
+            "files_skipped": 0,
+        }
 
     if paths is None:
         tree = github.list_tree(owner, repo, branch)
@@ -75,7 +99,7 @@ def sync_repo(
     skipped = 0
     for entry in tree:
         path = entry["path"]
-        sha  = entry["sha"]
+        sha = entry["sha"]
         text = github.fetch_blob(owner, repo, sha)
         if not text or not text.strip():
             skipped += 1
@@ -91,34 +115,42 @@ def sync_repo(
             remove_doc(slug)
 
         chunk_count = rag.upsert_doc(
-            slug, title, text, blob_url=blob_url, added_by=added_by or "github-ingest",
+            slug,
+            title,
+            text,
+            blob_url=blob_url,
+            added_by=added_by or "github-ingest",
         )
         if chunk_count == 0:
             skipped += 1
             continue
-        add_doc({
-            "slug":       slug,
-            "title":      title,
-            "blobUrl":    blob_url,
-            "chunkCount": chunk_count,
-            "addedAt":    int(time.time()),
-            "addedBy":    added_by or "github-ingest",
-            "source":     "github",
-            "ghOwner":    owner,
-            "ghRepo":     repo,
-            "ghPath":     path,
-        })
+        add_doc(
+            {
+                "slug": slug,
+                "title": title,
+                "blobUrl": blob_url,
+                "chunkCount": chunk_count,
+                "addedAt": int(time.time()),
+                "addedBy": added_by or "github-ingest",
+                "source": "github",
+                "ghOwner": owner,
+                "ghRepo": repo,
+                "ghPath": path,
+            }
+        )
         added += 1
 
     register_meta = get_git_repo(owner, repo) or {}
-    register_meta.update({
-        "url":       github.canonical_url(owner, repo),
-        "owner":     owner,
-        "repo":      repo,
-        "branch":    branch,
-        "lastSync":  int(time.time()),
-        "addedBy":   register_meta.get("addedBy") or (added_by or ""),
-    })
+    register_meta.update(
+        {
+            "url": github.canonical_url(owner, repo),
+            "owner": owner,
+            "repo": repo,
+            "branch": branch,
+            "lastSync": int(time.time()),
+            "addedBy": register_meta.get("addedBy") or (added_by or ""),
+        }
+    )
     register_meta.setdefault("addedAt", int(time.time()))
     add_git_repo(register_meta)
 
@@ -158,23 +190,29 @@ def ingest_one_file(
         remove_doc(slug)
 
     chunk_count = rag.upsert_doc(
-        slug, title, text, blob_url=blob_url, added_by=added_by or "github-ingest",
+        slug,
+        title,
+        text,
+        blob_url=blob_url,
+        added_by=added_by or "github-ingest",
     )
     if chunk_count == 0:
         return False
 
-    add_doc({
-        "slug":       slug,
-        "title":      title,
-        "blobUrl":    blob_url,
-        "chunkCount": chunk_count,
-        "addedAt":    int(time.time()),
-        "addedBy":    added_by or "github-ingest",
-        "source":     "github",
-        "ghOwner":    owner,
-        "ghRepo":     repo,
-        "ghPath":     path,
-    })
+    add_doc(
+        {
+            "slug": slug,
+            "title": title,
+            "blobUrl": blob_url,
+            "chunkCount": chunk_count,
+            "addedAt": int(time.time()),
+            "addedBy": added_by or "github-ingest",
+            "source": "github",
+            "ghOwner": owner,
+            "ghRepo": repo,
+            "ghPath": path,
+        }
+    )
     return True
 
 
@@ -214,27 +252,29 @@ def sync_repo_async(
     # Register up-front so webhook deltas + /git list both work even if
     # individual file ingests fail later.
     existing_meta = get_git_repo(owner, repo) or {}
-    existing_meta.update({
-        "url":      github.canonical_url(owner, repo),
-        "owner":    owner,
-        "repo":     repo,
-        "branch":   branch,
-        "addedBy":  existing_meta.get("addedBy") or (added_by or ""),
-        "lastSync": int(time.time()),
-    })
+    existing_meta.update(
+        {
+            "url": github.canonical_url(owner, repo),
+            "owner": owner,
+            "repo": repo,
+            "branch": branch,
+            "addedBy": existing_meta.get("addedBy") or (added_by or ""),
+            "lastSync": int(time.time()),
+        }
+    )
     existing_meta.setdefault("addedAt", int(time.time()))
     add_git_repo(existing_meta)
 
     paths = [{"path": e["path"], "sha": e["sha"]} for e in tree]
     body = {
-        "owner":        owner,
-        "repo":         repo,
-        "branch":       branch,
-        "paths":        paths,
-        "addedBy":      added_by or "",
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "paths": paths,
+        "addedBy": added_by or "",
         "notifyChatId": str(notify_chat_id) if notify_chat_id else "",
-        "added":        0,
-        "skipped":      0,
+        "added": 0,
+        "skipped": 0,
     }
     msg_id = qstash.publish(
         f"{PUBLIC_URL}/api/git-sync-batch",
@@ -245,7 +285,8 @@ def sync_repo_async(
         return {
             "ok": False,
             "reason": "QStash publish failed (check token + signing keys)",
-            "branch": branch, "files_total": len(tree),
+            "branch": branch,
+            "files_total": len(tree),
         }
 
     batches = (len(tree) + BATCH_SIZE - 1) // BATCH_SIZE
@@ -258,6 +299,86 @@ def sync_repo_async(
     }
 
 
+def enqueue_paths(
+    owner: str,
+    repo: str,
+    branch: str,
+    paths: Iterable[str],
+    *,
+    added_by: str | None = None,
+    notify_chat_id: int | str | None = None,
+) -> dict:
+    """Queue ``paths`` from ``owner/repo@branch`` through the QStash batch
+    pipeline.
+
+    Used by the GitHub push webhook when a single push touches more files
+    than fit comfortably inside Vercel's 60s cap. Resolves SHAs once via
+    one tree walk, then hands the list off to the same batch handler used
+    by ``sync_repo_async`` so the work is split across BATCH_SIZE-sized
+    callbacks.
+
+    Returns the same shape as ``sync_repo_async``.
+    """
+    if not PUBLIC_URL:
+        return {"ok": False, "reason": "PUBLIC_URL unset; cannot build QStash callback"}
+
+    target = {p for p in paths if p}
+    if not target:
+        return {
+            "ok": True,
+            "branch": branch,
+            "files_total": 0,
+            "batches": 0,
+            "queued": False,
+        }
+
+    full = github.list_tree(owner, repo, branch)
+    if not full:
+        return {"ok": False, "reason": "repo tree was empty or not readable"}
+    entries = [
+        {"path": e["path"], "sha": e["sha"]} for e in full if e["path"] in target
+    ]
+    if not entries:
+        return {
+            "ok": True,
+            "branch": branch,
+            "files_total": 0,
+            "batches": 0,
+            "queued": False,
+        }
+
+    body = {
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "paths": entries,
+        "addedBy": added_by or "",
+        "notifyChatId": str(notify_chat_id) if notify_chat_id else "",
+        "added": 0,
+        "skipped": 0,
+    }
+    msg_id = qstash.publish(
+        f"{PUBLIC_URL}/api/git-sync-batch",
+        body=body,
+        delay_seconds=0,
+    )
+    if not msg_id:
+        return {
+            "ok": False,
+            "reason": "QStash publish failed (check token + signing keys)",
+            "branch": branch,
+            "files_total": len(entries),
+        }
+    batches = (len(entries) + BATCH_SIZE - 1) // BATCH_SIZE
+    return {
+        "ok": True,
+        "branch": branch,
+        "files_total": len(entries),
+        "batches": batches,
+        "queued": True,
+    }
+
+
 def process_batch(payload: dict) -> dict:
     """Run one QStash-delivered batch. Called by api/git_sync_batch.py.
 
@@ -265,19 +386,24 @@ def process_batch(payload: dict) -> dict:
     QStash message with the remainder, or DMs the notify chat that the
     repo is complete. Returns a summary so the endpoint can log it.
     """
-    owner   = payload["owner"]
-    repo    = payload["repo"]
-    branch  = payload["branch"]
-    paths   = payload.get("paths") or []
-    added   = int(payload.get("added", 0))
+    owner = payload["owner"]
+    repo = payload["repo"]
+    branch = payload["branch"]
+    paths = payload.get("paths") or []
+    added = int(payload.get("added", 0))
     skipped = int(payload.get("skipped", 0))
-    notify  = payload.get("notifyChatId") or ""
+    notify = payload.get("notifyChatId") or ""
     addedBy = payload.get("addedBy") or "github-fanout"
 
     head, tail = paths[:BATCH_SIZE], paths[BATCH_SIZE:]
     for entry in head:
         ok = ingest_one_file(
-            owner, repo, branch, entry["path"], entry["sha"], added_by=addedBy,
+            owner,
+            repo,
+            branch,
+            entry["path"],
+            entry["sha"],
+            added_by=addedBy,
         )
         if ok:
             added += 1
@@ -290,13 +416,23 @@ def process_batch(payload: dict) -> dict:
         qstash.publish(
             f"{PUBLIC_URL}/api/git-sync-batch",
             body={
-                "owner": owner, "repo": repo, "branch": branch,
-                "paths": tail, "addedBy": addedBy, "notifyChatId": notify,
-                "added": added, "skipped": skipped,
+                "owner": owner,
+                "repo": repo,
+                "branch": branch,
+                "paths": tail,
+                "addedBy": addedBy,
+                "notifyChatId": notify,
+                "added": added,
+                "skipped": skipped,
             },
             delay_seconds=0,
         )
-        return {"phase": "continued", "added": added, "skipped": skipped, "remaining": len(tail)}
+        return {
+            "phase": "continued",
+            "added": added,
+            "skipped": skipped,
+            "remaining": len(tail),
+        }
 
     # Final batch — stamp lastSync + notify if asked.
     meta = get_git_repo(owner, repo) or {"owner": owner, "repo": repo, "branch": branch}
@@ -306,6 +442,7 @@ def process_batch(payload: dict) -> dict:
     if notify:
         try:
             from bot.clients import bot
+
             bot.send_message(
                 int(notify) if notify.lstrip("-").isdigit() else notify,
                 f"✅ <b>{owner}/{repo}</b> sync complete — "
@@ -336,9 +473,11 @@ def remove_all(owner: str, repo: str) -> int:
     """Purge every vector + doc entry for this repo. Returns count removed."""
     purged = 0
     for d in list(list_docs()):
-        if d.get("source") == "github" and \
-                d.get("ghOwner", "").lower() == owner.lower() and \
-                d.get("ghRepo", "").lower() == repo.lower():
+        if (
+            d.get("source") == "github"
+            and d.get("ghOwner", "").lower() == owner.lower()
+            and d.get("ghRepo", "").lower() == repo.lower()
+        ):
             rag.delete_doc(d.get("slug", ""), int(d.get("chunkCount", 0)))
             remove_doc(d.get("slug", ""))
             purged += 1

@@ -11,8 +11,10 @@ Web search (Tavily) is kept only as a secondary signal for dated or
 real-time queries when RAG has no hits. When TAVILY_API_KEY is unset
 (default) this path is skipped entirely.
 """
+
 from __future__ import annotations
 
+import html
 import re
 
 from bot.clients import ai
@@ -35,9 +37,24 @@ from bot.ta.state import (
 
 
 SEARCH_TRIGGERS = [
-    "today", "latest", "current", "news", "now", "recent", "this week",
-    "this month", "this year", "happened", "who won", "what is happening",
-    "weather", "price", "score", "update", "announce", "release",
+    "today",
+    "latest",
+    "current",
+    "news",
+    "now",
+    "recent",
+    "this week",
+    "this month",
+    "this year",
+    "happened",
+    "who won",
+    "what is happening",
+    "weather",
+    "price",
+    "score",
+    "update",
+    "announce",
+    "release",
 ]
 
 
@@ -112,6 +129,7 @@ def _maybe_search_block(question: str, has_rag_hits: bool) -> str | None:
         return None
     try:
         from bot.search import web_search
+
         results, _sources = web_search(question)
         if not results:
             return None
@@ -123,6 +141,18 @@ def _maybe_search_block(question: str, has_rag_hits: bool) -> str | None:
     except Exception as e:
         print(f"[ai] search error: {e}")
         return None
+
+
+def _dm_fallback_reply(question: str, p: Prepared) -> str:
+    """Last-resort DM response when the model emits IGNORE/empty/hedged text."""
+    if getattr(p, "is_instructor", False):
+        return "I'm here. Send me what you want to check or change."
+    if question.strip().endswith(("?", "՞", "؟")):
+        return (
+            "I don't have enough context to answer that confidently yet. "
+            "Send me a little more detail, or mention the exact course topic."
+        )
+    return "I'm here. Send me a course question or a follow-up from the group."
 
 
 def answer(p: Prepared) -> str | None:
@@ -147,22 +177,36 @@ def answer(p: Prepared) -> str | None:
     messages: list[dict] = [{"role": "system", "content": system_msg}]
     if extra_system:
         messages.append({"role": "system", "content": extra_system})
+    if p.is_dm:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "This is a private DM. Always send a useful reply in DMs "
+                    "for both students and the instructor. Never output IGNORE "
+                    "in a DM. For greetings or unclear messages, reply briefly "
+                    "and invite the user to send the question or follow-up."
+                ),
+            }
+        )
 
     # In DMs: inject the student's last group Q&A as context so follow-ups
     # work without the student having to re-state the question.
     if p.is_dm:
         prior = get_last_group_qa(p.user_id)
         if prior:
-            messages.append({
-                "role": "system",
-                "content": (
-                    "The student is following up on a recent group conversation. "
-                    "Here is the original exchange:\n\n"
-                    f"Student asked: {prior.get('question', '')}\n"
-                    f"You replied: {prior.get('answer', '')}\n\n"
-                    "Use this as context for the follow-up question below."
-                ),
-            })
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "The student is following up on a recent group conversation. "
+                        "Here is the original exchange:\n\n"
+                        f"Student asked: {prior.get('question', '')}\n"
+                        f"You replied: {prior.get('answer', '')}\n\n"
+                        "Use this as context for the follow-up question below."
+                    ),
+                }
+            )
 
     history = get_history(p.group_key, limit=MAX_HISTORY)
     for turn in history:
@@ -193,7 +237,9 @@ def answer(p: Prepared) -> str | None:
     #     (we don't want "IGNORE" polluting the context).
     reply = guardrail.clean(raw_reply)
     if not reply:
-        return None
+        if not p.is_dm:
+            return None
+        reply = _dm_fallback_reply(raw, p)
 
     # 4. Persist — group-level history so the whole class shares context.
     append_history(p.group_key, "user", user_payload, limit=MAX_HISTORY)
@@ -204,22 +250,34 @@ def answer(p: Prepared) -> str | None:
     #     to read than user_payload.
     if p.is_dm:
         append_dm_log(
-            p.user_id, "user", raw,
-            username=p.username, first_name=p.first_name,
+            p.user_id,
+            "user",
+            raw,
+            username=p.username,
+            first_name=p.first_name,
         )
         append_dm_log(
-            p.user_id, "assistant", reply,
-            username=p.username, first_name=p.first_name,
+            p.user_id,
+            "assistant",
+            reply,
+            username=p.username,
+            first_name=p.first_name,
         )
 
     # 4b. In groups: snapshot this Q&A per student so DM follow-ups work.
     if not p.is_dm:
         save_last_group_qa(p.user_id, raw, reply, p.group_key)
 
-    # 5. Append source citations — only for sources the model signalled it
-    #    actually used (via the SOURCES_USED trailer). If the trailer is
-    #    missing (legacy model) or empty, we stay silent rather than cite
-    #    everything the retriever returned.
+    # 5. Build the outbound HTML message. History above is stored as plain
+    #    text (the model's raw output); only the rendered reply is escaped
+    #    and decorated. send_reply uses parse_mode="HTML" so any unescaped
+    #    `<` / `&` from the model would 400 the message — escape now.
+    outbound = html.escape(reply)
+
+    # 5a. Append source citations — only for sources the model signalled it
+    #     actually used (via the SOURCES_USED trailer). If the trailer is
+    #     missing (legacy model) or empty, we stay silent rather than cite
+    #     everything the retriever returned.
     if matches and used_sources:
         seen_urls: set[str] = set()
         sources: list[str] = []
@@ -231,16 +289,19 @@ def answer(p: Prepared) -> str | None:
             title = ((m.get("title") or "").strip()) or "doc"
             if url and url in seen_urls:
                 continue
+            title_html = html.escape(title)
             if url:
-                sources.append(f"• [{title}]({url})")
+                sources.append(
+                    f'• <a href="{html.escape(url, quote=True)}">{title_html}</a>'
+                )
                 seen_urls.add(url)
             else:
-                sources.append(f"• {title}")
+                sources.append(f"• {title_html}")
         if sources:
-            reply = f"{reply}\n\n**Sources:**\n" + "\n".join(sources[:5])
+            outbound = f"{outbound}\n\n<b>Sources:</b>\n" + "\n".join(sources[:5])
 
     # 6. In groups: nudge students to DM for follow-up.
     if not p.is_dm:
-        reply += "\n\n_DM me if you'd like to ask follow-up questions._"
+        outbound += "\n\n<i>DM me if you'd like to ask follow-up questions.</i>"
 
-    return reply
+    return outbound

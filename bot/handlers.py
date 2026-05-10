@@ -9,18 +9,26 @@ free-form text both end up in the same place.
 they are not ``Message`` updates, so telebot dispatches them via a
 different decorator.
 """
+
 from __future__ import annotations
 
 import os
 from datetime import datetime
 
+from bot import voice as voice_module
 from bot.clients import bot, BOT_INFO
+from bot.config import MAX_VOICE_SECONDS
 from bot.ta import admin as ta_admin
-from bot.ta.state import register_group, unregister_group
+from bot.ta.state import unregister_group
 from bot.ta.welcome import send_group_welcome_once
 
 
-VERBOSE_LOG = os.environ.get("BOT_VERBOSE_LOG", "").strip().lower() in ("1", "true", "yes", "on")
+VERBOSE_LOG = os.environ.get("BOT_VERBOSE_LOG", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 
 def _log(message, direction: str, text: str) -> None:
@@ -37,7 +45,9 @@ def _log(message, direction: str, text: str) -> None:
     snippet = (text or "").replace("\n", " ").replace("\r", " ")
     if len(snippet) > 500:
         snippet = snippet[:500] + "..."
-    sender, receiver = (user_name, bot_name) if direction == "in" else (bot_name, user_name)
+    sender, receiver = (
+        (user_name, bot_name) if direction == "in" else (bot_name, user_name)
+    )
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {sender} → {receiver}: {snippet}", flush=True)
 
@@ -46,6 +56,55 @@ def _log(message, direction: str, text: str) -> None:
 @bot.message_handler(content_types=["text"])
 def _route_text(message) -> None:
     _log(message, "in", getattr(message, "text", "") or "")
+    ta_admin.route(message)
+
+
+# ── Voice messages: transcribe via Cloudflare Whisper, then route as text ─
+@bot.message_handler(content_types=["voice"])
+def _route_voice(message) -> None:
+    voice = getattr(message, "voice", None)
+    if voice is None:
+        return
+
+    if not voice_module.is_enabled():
+        bot.reply_to(
+            message,
+            "Voice messages aren't enabled on this bot. Please type your question.",
+        )
+        return
+
+    duration = getattr(voice, "duration", 0) or 0
+    if duration > MAX_VOICE_SECONDS:
+        bot.reply_to(
+            message,
+            f"Voice message too long ({duration}s). Keep it under {MAX_VOICE_SECONDS}s, or type your question.",
+        )
+        return
+
+    try:
+        file_info = bot.get_file(voice.file_id)
+        audio_bytes = bot.download_file(file_info.file_path)
+        transcript = voice_module.transcribe(audio_bytes)
+    except Exception as e:
+        print(f"[handlers] voice transcription error: {e}")
+        bot.reply_to(
+            message,
+            "Sorry, I couldn't transcribe that voice message. Please try again or type your question.",
+        )
+        return
+
+    if not transcript:
+        bot.reply_to(
+            message,
+            "I couldn't hear any speech in that voice message. Please try again or type your question.",
+        )
+        return
+
+    _log(message, "in", f"[VOICE→TEXT] {transcript}")
+    message.text = transcript
+    # Tells bot.helpers.send_reply to route the AI reply through Aura-1
+    # TTS so the student hears the answer instead of reading it.
+    message._reply_as_voice = True
     ta_admin.route(message)
 
 

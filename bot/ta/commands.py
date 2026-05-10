@@ -3,16 +3,25 @@
 Stage 3 ships the read-only and admin-list mutation commands. Later
 stages add /doc, /quiz, /stats, /grade, /announce, /purge, /reveal.
 """
+
 from __future__ import annotations
 
 import html
+import io
 import random
 import time
 from typing import Callable
 
 from bot import github as gh
+from bot import voice as voice_module
 from bot.clients import bot as _bot
-from bot.config import BOT_ENV, DEFAULT_MODEL, PERMANENT_ADMIN, VALID_MODELS, VECTOR_NAMESPACE
+from bot.config import (
+    BOT_ENV,
+    DEFAULT_MODEL,
+    PERMANENT_ADMIN,
+    VALID_MODELS,
+    VECTOR_NAMESPACE,
+)
 from bot.ta import announcements as ann_mod
 from bot.ta import docs as docs_mod
 from bot.ta import git_ingest as git_mod
@@ -24,6 +33,7 @@ from bot.ta import upgrade as upgrade_mod
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     add_admin,
+    add_admin_id,
     add_feedback,
     clear_active_model,
     clear_dm_log,
@@ -43,11 +53,13 @@ from bot.ta.state import (
     list_feedback,
     list_groups,
     remove_admin,
+    remove_admin_id,
     reset_group_stats,
     set_active_group_id,
     set_active_model,
+    set_voice_speaker,
 )
-from bot.ta.tg import delete_message, send_message
+from bot.ta.tg import send_message
 
 
 _Handler = Callable[[Prepared], None]
@@ -59,6 +71,7 @@ def _register(*names: str):
         for n in names:
             _REGISTRY[n] = fn
         return fn
+
     return deco
 
 
@@ -112,6 +125,10 @@ def _cmd_help(p: Prepared) -> None:
         "/model — list models, mark active",
         "/model &lt;name&gt; — switch chat model",
         "/reset — clear history + reset model for active group",
+        "",
+        "<b>Voice</b>",
+        "/voice — list voices, mark active",
+        "/voice &lt;name&gt; — switch bot voice (audio preview to your DM)",
         "",
         "<b>Knowledge</b>",
         "/doc — list indexed docs",
@@ -192,7 +209,9 @@ def _cmd_admin(p: Prepared) -> None:
     if sub == "remove":
         _admin_remove(p, tokens[1] if len(tokens) > 1 else "")
         return
-    send_message(p.user_id, "Usage: /admin [list] | /admin add @user | /admin remove @user")
+    send_message(
+        p.user_id, "Usage: /admin [list] | /admin add @user | /admin remove @user"
+    )
 
 
 def _admin_list(p: Prepared) -> None:
@@ -206,19 +225,31 @@ def _admin_add(p: Prepared, raw_target: str) -> None:
     if not target:
         send_message(p.user_id, "Usage: /admin add @username")
         return
-    if not add_admin(target):
+    # Resolve username -> Telegram user_id via the chat map populated whenever
+    # the user has spoken to the bot. ID-keyed admin grants are immune to
+    # username recycling (a future user grabbing the freed @handle stays
+    # un-privileged). We still write the username set for backward compat
+    # with prepare.py's fallback path.
+    target_chat = get_user_chat(target)
+    if not target_chat:
+        send_message(
+            p.user_id,
+            f"@{target} hasn't messaged the bot yet — ask them to DM /start, "
+            f"then re-run /admin add.",
+        )
+        return
+    add_admin(target)
+    if not add_admin_id(target_chat, target):
         send_message(p.user_id, f"Could not add @{target}.")
         return
     send_message(p.user_id, f"✅ @{target} is now an admin.")
 
     # Best-effort DM to the new admin so they know they have access.
-    target_chat = get_user_chat(target)
-    if target_chat:
-        send_message(
-            target_chat,
-            f"You were granted admin access by @{p.username or 'instructor'}.\n"
-            "Use /help to see the commands available to you.",
-        )
+    send_message(
+        target_chat,
+        f"You were granted admin access by @{p.username or 'instructor'}.\n"
+        "Use /help to see the commands available to you.",
+    )
 
 
 def _admin_remove(p: Prepared, raw_target: str) -> None:
@@ -227,11 +258,20 @@ def _admin_remove(p: Prepared, raw_target: str) -> None:
         send_message(p.user_id, "Usage: /admin remove @username")
         return
     if target == PERMANENT_ADMIN:
-        send_message(p.user_id, f"Cannot remove the permanent admin (@{PERMANENT_ADMIN}).")
+        send_message(
+            p.user_id, f"Cannot remove the permanent admin (@{PERMANENT_ADMIN})."
+        )
         return
     if p.username and target == p.username:
         send_message(p.user_id, "You cannot remove yourself.")
         return
+    # Belt and suspenders: remove_admin already purges any K_ADMIN_IDS entry
+    # whose stored username matches `target`, but if the user has since
+    # renamed, that match would miss. Explicit ID removal covers it when we
+    # can resolve the chat id.
+    target_chat = get_user_chat(target)
+    if target_chat:
+        remove_admin_id(target_chat)
     if not remove_admin(target):
         send_message(p.user_id, f"Could not remove @{target}.")
         return
@@ -285,6 +325,77 @@ def _cmd_model(p: Prepared) -> None:
     )
 
 
+# ── /voice [name] ─────────────────────────────────────────────────────────
+@_register("voice")
+def _cmd_voice(p: Prepared) -> None:
+    """List or set the bot's TTS voice. On set, DM an audio preview in the new voice.
+
+    Storage is global (one bot voice across all chats), keyed under
+    ``REDIS_PREFIX``. Validates against ``voice.AURA_SPEAKERS`` so a typo
+    can't poison the live config.
+    """
+    args = p.command_args.strip().lower()
+    if not args:
+        current = voice_module.get_active_speaker()
+        lines = ["<b>Bot voice</b>"]
+        for s in voice_module.AURA_SPEAKERS:
+            gender = voice_module.AURA_SPEAKER_GENDERS.get(s, "?")
+            marker = " (active)" if s == current else ""
+            lines.append(f"• <code>{s}</code> — {gender}{marker}")
+        lines.append("")
+        lines.append("Switch: /voice &lt;name&gt;")
+        send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+        return
+
+    choice = args.split()[0]
+    if choice not in voice_module.AURA_SPEAKERS:
+        send_message(
+            p.user_id,
+            f"Invalid voice: <code>{html.escape(choice)}</code>\n"
+            f"Valid options: {', '.join(voice_module.AURA_SPEAKERS)}",
+            parse_mode="HTML",
+        )
+        return
+
+    set_voice_speaker(choice)
+
+    if not voice_module.is_enabled():
+        send_message(
+            p.user_id,
+            f"✅ Voice set to <code>{choice}</code>. "
+            "(TTS not configured — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN to enable audio.)",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        audio = voice_module.synthesize(
+            f"Voice set to {choice.title()}. This is how I will sound from now on.",
+            speaker=choice,
+        )
+    except Exception as e:
+        print(f"[ta.commands] /voice synthesis error: {e}")
+        send_message(
+            p.user_id,
+            f"✅ Voice set to <code>{choice}</code>, but the audio preview failed.",
+            parse_mode="HTML",
+        )
+        return
+
+    buf = io.BytesIO(audio)
+    buf.name = "voice_preview.mp3"
+    try:
+        _bot.send_voice(p.user_id, buf, caption=f"✅ Voice set to {choice}")
+    except Exception as e:
+        print(f"[ta.commands] /voice send_voice error: {e}")
+        send_message(
+            p.user_id,
+            f"✅ Voice set to <code>{choice}</code>. "
+            f"Couldn't deliver audio preview: {html.escape(str(e))}",
+            parse_mode="HTML",
+        )
+
+
 # ── /group [N|chatId|list] ────────────────────────────────────────────────
 @_register("group")
 def _cmd_group(p: Prepared) -> None:
@@ -319,10 +430,18 @@ def _cmd_group(p: Prepared) -> None:
         target = choice
 
     if target is None:
-        send_message(p.user_id, f"No linked group matches <code>{html.escape(choice)}</code>.", parse_mode="HTML")
+        send_message(
+            p.user_id,
+            f"No linked group matches <code>{html.escape(choice)}</code>.",
+            parse_mode="HTML",
+        )
         return
     set_active_group_id(target)
-    send_message(p.user_id, f"✅ Active group switched to <code>{target}</code>.", parse_mode="HTML")
+    send_message(
+        p.user_id,
+        f"✅ Active group switched to <code>{target}</code>.",
+        parse_mode="HTML",
+    )
 
 
 # ── /doc list|add|update|delete ───────────────────────────────────────────
@@ -338,7 +457,9 @@ def _cmd_quiz(p: Prepared) -> None:
     # use the active group as the target; otherwise reply with guidance.
     target_chat = p.chat_id if not p.is_dm else get_active_group_id()
     if not target_chat:
-        send_message(p.user_id, "No active group. Use /group first or run /quiz in a group.")
+        send_message(
+            p.user_id, "No active group. Use /group first or run /quiz in a group."
+        )
         return
     topic = (p.command_args or "").strip()
     quiz_mod.start_quiz(p, topic, target_chat)
@@ -349,7 +470,9 @@ def _cmd_quiz(p: Prepared) -> None:
 def _cmd_reveal(p: Prepared) -> None:
     target_chat = p.chat_id if not p.is_dm else get_active_group_id()
     if not target_chat:
-        send_message(p.user_id, "No active group. Use /group first or run /reveal in a group.")
+        send_message(
+            p.user_id, "No active group. Use /group first or run /reveal in a group."
+        )
         return
     if not quiz_mod.reveal_now(target_chat):
         send_message(p.user_id, "No active quiz to reveal in that chat.")
@@ -420,14 +543,17 @@ def _cmd_stats(p: Prepared) -> None:
     if sub == "reset":
         gk = p.group_key
         reset_group_stats(gk)
-        send_message(p.user_id, f"✅ Cleared stats for <code>{gk}</code>.\n"
-                     "(messages, scores, quiz history, conversation history)",
-                     parse_mode="HTML")
+        send_message(
+            p.user_id,
+            f"✅ Cleared stats for <code>{gk}</code>.\n"
+            "(messages, scores, quiz history, conversation history)",
+            parse_mode="HTML",
+        )
         return
 
-    stats_map  = get_group_stats(p.group_key)
+    stats_map = get_group_stats(p.group_key)
     scores_map = get_quiz_scores(p.group_key)
-    total_q    = get_total_quizzes(p.group_key)
+    total_q = get_total_quizzes(p.group_key)
 
     if not stats_map and not scores_map:
         send_message(p.user_id, "No stats yet for this context.")
@@ -450,13 +576,17 @@ def _cmd_stats(p: Prepared) -> None:
     if scores_map:
         lines.append("")
         lines.append("<b>Quiz scores</b>")
+
         def _accuracy(kv):
             data = kv[1]
             t = int(data.get("total", 0))
             return (int(data.get("correct", 0)) / t) if t else 0.0
+
         by_acc = sorted(scores_map.items(), key=_accuracy, reverse=True)[:15]
         for _uid, data in by_acc:
-            name = html.escape(data.get("firstName") or data.get("username") or "(unknown)")
+            name = html.escape(
+                data.get("firstName") or data.get("username") or "(unknown)"
+            )
             c, t = int(data.get("correct", 0)), int(data.get("total", 0))
             pct = 100 * c / t if t else 0
             lines.append(f"• {name} — {c}/{t} ({pct:.0f}%)")
@@ -468,9 +598,9 @@ def _cmd_stats(p: Prepared) -> None:
 @_register("grade")
 def _cmd_grade(p: Prepared) -> None:
     target_username = _first_username(p.command_args)
-    stats_map  = get_group_stats(p.group_key)
+    stats_map = get_group_stats(p.group_key)
     scores_map = get_quiz_scores(p.group_key)
-    total_q    = get_total_quizzes(p.group_key)
+    total_q = get_total_quizzes(p.group_key)
     engagement = stats_mod.compute_all(stats_map, scores_map, total_q)
 
     if target_username:
@@ -479,10 +609,15 @@ def _cmd_grade(p: Prepared) -> None:
             None,
         )
         if match is None:
-            send_message(p.user_id, f"No data for @{html.escape(target_username)} in <code>{p.group_key}</code>.",
-                         parse_mode="HTML")
+            send_message(
+                p.user_id,
+                f"No data for @{html.escape(target_username)} in <code>{p.group_key}</code>.",
+                parse_mode="HTML",
+            )
             return
-        send_message(p.user_id, _render_grade_detail(match, p.group_key), parse_mode="HTML")
+        send_message(
+            p.user_id, _render_grade_detail(match, p.group_key), parse_mode="HTML"
+        )
         return
 
     if not engagement:
@@ -495,9 +630,9 @@ def _cmd_grade(p: Prepared) -> None:
         f"Quizzes posted: {total_q}",
         "",
         "<b>Scoring formula (out of 100):</b>",
-        f"  30% messages (capped at 20)",
+        "  30% messages (capped at 20)",
         f"  40% quiz participation (attempted / {total_q})",
-        f"  30% quiz accuracy (correct / attempted)",
+        "  30% quiz accuracy (correct / attempted)",
         "",
     ]
     for e in engagement[:25]:
@@ -515,7 +650,11 @@ def _cmd_grade(p: Prepared) -> None:
 def _render_grade_detail(e: "stats_mod.Engagement", group_key: str) -> str:
     flag = " \u26a0\ufe0f (inactive >7d)" if e.inactive else ""
     streak = get_streak(group_key, e.user_id)
-    streak_line = f"\n  \u2022 Streak: \U0001f525{streak} consecutive correct" if streak >= 2 else "\n  \u2022 Streak: 0"
+    streak_line = (
+        f"\n  \u2022 Streak: \U0001f525{streak} consecutive correct"
+        if streak >= 2
+        else "\n  \u2022 Streak: 0"
+    )
     return (
         f"<b>{html.escape(e.display_name)}</b>{flag}\n"
         f"Total: <b>{e.total_pts:.0f}/100</b>\n"
@@ -538,6 +677,7 @@ def _cmd_announce(p: Prepared) -> None:
 @_register("git")
 def _cmd_git(p: Prepared) -> None:
     from bot.ta.state import list_git_repos
+
     tokens = (p.command_args or "").split()
     sub = tokens[0].lower() if tokens else ""
     arg = tokens[1] if len(tokens) > 1 else ""
@@ -564,6 +704,7 @@ def _cmd_git(p: Prepared) -> None:
             return
         owner, repo, branch = parsed
         from bot.ta.state import get_git_repo
+
         if get_git_repo(owner, repo):
             send_message(
                 p.user_id,
@@ -573,7 +714,11 @@ def _cmd_git(p: Prepared) -> None:
             )
             return
         result = git_mod.sync_repo_async(
-            owner, repo, branch, added_by=p.username, notify_chat_id=p.user_id,
+            owner,
+            repo,
+            branch,
+            added_by=p.username,
+            notify_chat_id=p.user_id,
         )
         if not result.get("ok"):
             send_message(p.user_id, f"❌ Failed: {result.get('reason', 'unknown')}")
@@ -602,6 +747,7 @@ def _cmd_git(p: Prepared) -> None:
 
     if sub == "sync":
         from bot.ta.state import get_git_repo, list_git_repos
+
         # No arg → re-sync every tracked repo. Useful after schema/embedding changes.
         if not arg:
             repos = list_git_repos()
@@ -614,22 +760,32 @@ def _cmd_git(p: Prepared) -> None:
                 owner, repo = r.get("owner", ""), r.get("repo", "")
                 branch = r.get("branch") or None
                 result = git_mod.sync_repo_async(
-                    owner, repo, branch, added_by=p.username, notify_chat_id=p.user_id,
+                    owner,
+                    repo,
+                    branch,
+                    added_by=p.username,
+                    notify_chat_id=p.user_id,
                 )
                 if result.get("ok"):
                     n = result["files_total"]
                     total += n
                     lines.append(f"• <code>{owner}/{repo}</code> — {n} files")
                 else:
-                    lines.append(f"• <code>{owner}/{repo}</code> — ❌ {result.get('reason', '?')}")
+                    lines.append(
+                        f"• <code>{owner}/{repo}</code> — ❌ {result.get('reason', '?')}"
+                    )
             lines.append("")
-            lines.append(f"Total: <b>{total}</b> files. You'll get a DM per repo as it finishes.")
+            lines.append(
+                f"Total: <b>{total}</b> files. You'll get a DM per repo as it finishes."
+            )
             send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
             return
 
         parsed = gh.parse_repo_url(arg)
         if not parsed:
-            send_message(p.user_id, "Usage: /git sync [<owner/repo>] (no arg = sync all)")
+            send_message(
+                p.user_id, "Usage: /git sync [<owner/repo>] (no arg = sync all)"
+            )
             return
         owner, repo, branch = parsed
         if not get_git_repo(owner, repo):
@@ -641,7 +797,11 @@ def _cmd_git(p: Prepared) -> None:
             )
             return
         result = git_mod.sync_repo_async(
-            owner, repo, branch, added_by=p.username, notify_chat_id=p.user_id,
+            owner,
+            repo,
+            branch,
+            added_by=p.username,
+            notify_chat_id=p.user_id,
         )
         if not result.get("ok"):
             send_message(p.user_id, f"❌ Failed: {result.get('reason', 'unknown')}")
@@ -654,12 +814,14 @@ def _cmd_git(p: Prepared) -> None:
         )
         return
 
-    send_message(p.user_id, "Usage: /git list | add <repo> | remove <repo> | sync <repo>")
+    send_message(
+        p.user_id, "Usage: /git list | add <repo> | remove <repo> | sync <repo>"
+    )
 
 
 # ── /dm list|view|clear ───────────────────────────────────────────────────
-_DM_VIEW_LIMIT = 40          # last N turns rendered per /dm view
-_DM_CHUNK_SIZE = 3500        # safe under Telegram's 4096-char HTML limit
+_DM_VIEW_LIMIT = 40  # last N turns rendered per /dm view
+_DM_CHUNK_SIZE = 3500  # safe under Telegram's 4096-char HTML limit
 
 
 def _resolve_dm_target(raw_arg: str) -> str | None:
@@ -728,14 +890,14 @@ def _dm_cmd_list(p: Prepared) -> None:
     now = int(time.time())
     lines = [f"<b>Active DMs</b> ({len(users)})"]
     for u in users:
-        uid       = str(u.get("userId", "?"))
-        uname     = u.get("username") or ""
-        fname     = u.get("firstName") or ""
-        turns     = int(u.get("turns", 0))
-        last      = int(u.get("lastActive") or 0)
-        ago       = _human_ago(now - last) if last else "?"
-        label     = html.escape(fname or uname or f"user:{uid}")
-        handle    = f"@{html.escape(uname)}" if uname else ""
+        uid = str(u.get("userId", "?"))
+        uname = u.get("username") or ""
+        fname = u.get("firstName") or ""
+        turns = int(u.get("turns", 0))
+        last = int(u.get("lastActive") or 0)
+        ago = _human_ago(now - last) if last else "?"
+        label = html.escape(fname or uname or f"user:{uid}")
+        handle = f"@{html.escape(uname)}" if uname else ""
         lines.append(
             f"• <b>{label}</b> {handle} — <code>{html.escape(uid)}</code>, "
             f"{turns} turns, last {ago}"
@@ -760,8 +922,11 @@ def _dm_cmd_view(p: Prepared, raw_arg: str) -> None:
         return
     turns = get_dm_log(uid, limit=_DM_VIEW_LIMIT)
     if not turns:
-        send_message(p.user_id, f"No DM transcript for user <code>{html.escape(uid)}</code>.",
-                     parse_mode="HTML")
+        send_message(
+            p.user_id,
+            f"No DM transcript for user <code>{html.escape(uid)}</code>.",
+            parse_mode="HTML",
+        )
         return
     meta = get_dm_meta(uid) or {}
     label = meta.get("firstName") or meta.get("username") or f"user:{uid}"
@@ -787,11 +952,17 @@ def _dm_cmd_clear(p: Prepared, raw_arg: str) -> None:
         )
         return
     if clear_dm_log(uid):
-        send_message(p.user_id, f"✅ Cleared DM transcript for <code>{html.escape(uid)}</code>.",
-                     parse_mode="HTML")
+        send_message(
+            p.user_id,
+            f"✅ Cleared DM transcript for <code>{html.escape(uid)}</code>.",
+            parse_mode="HTML",
+        )
     else:
-        send_message(p.user_id, f"No DM transcript to clear for <code>{html.escape(uid)}</code>.",
-                     parse_mode="HTML")
+        send_message(
+            p.user_id,
+            f"No DM transcript to clear for <code>{html.escape(uid)}</code>.",
+            parse_mode="HTML",
+        )
 
 
 def _human_ago(seconds: int) -> str:
@@ -827,7 +998,9 @@ def _cmd_vstats(p: Prepared) -> None:
     if namespaces:
         lines.append("")
         lines.append("<b>Namespaces</b>")
-        for name, ns in sorted(namespaces.items(), key=lambda kv: -int(kv[1].get("vector_count", 0))):
+        for name, ns in sorted(
+            namespaces.items(), key=lambda kv: -int(kv[1].get("vector_count", 0))
+        ):
             label = name or "(default)"
             marker = "✅ " if (name or "") == (VECTOR_NAMESPACE or "") else "   "
             pending = int(ns.get("pending_vector_count", 0))
@@ -866,6 +1039,7 @@ def _cmd_purge(p: Prepared) -> None:
                 # Extract new chat id — telebot surfaces it inside the
                 # Telegram error. Format: migrate_to_chat_id=-100...
                 import re as _re
+
                 m = _re.search(r"migrate_to_chat_id[^0-9\-]*(-?\d+)", err)
                 if m:
                     migrated_to = m.group(1)
@@ -912,15 +1086,18 @@ def _cmd_upgrade(p: Prepared) -> None:
     try:
         result = upgrade_mod.fire(instructions)
     except upgrade_mod.UpgradeError as e:
-        send_message(p.user_id, f"❌ Could not fire routine: {html.escape(str(e))}",
-                     parse_mode="HTML")
+        send_message(
+            p.user_id,
+            f"❌ Could not fire routine: {html.escape(str(e))}",
+            parse_mode="HTML",
+        )
         return
 
     send_message(
         p.user_id,
         "✅ <b>Upgrade routine triggered.</b>\n"
         "Claude is now editing the repo, writing tests, and opening a PR.\n\n"
-        f"Session: <a href=\"{html.escape(result.session_url)}\">"
+        f'Session: <a href="{html.escape(result.session_url)}">'
         f"{html.escape(result.session_id)}</a>\n"
         "You'll see the PR appear on the <code>test</code> branch when it's done.",
         parse_mode="HTML",

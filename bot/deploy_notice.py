@@ -5,6 +5,7 @@ When a new build goes live on Vercel, the first request calls
 and a list of commit subjects since the previous deploy. Uses the
 GitHub compare API to compute the diff — no local git needed.
 """
+
 from __future__ import annotations
 
 import os
@@ -30,19 +31,22 @@ def _changelog(prev_sha: str, new_sha: str) -> list[str]:
         return []
     try:
         import requests
+
         headers = {"Accept": "application/vnd.github+json"}
         if GITHUB_TOKEN:
             headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
         resp = requests.get(
             f"https://api.github.com/repos/{owner}/{slug}/compare/{prev_sha[:7]}...{new_sha[:7]}",
-            headers=headers, timeout=5,
+            headers=headers,
+            timeout=5,
         )
         if resp.status_code >= 400:
             return []
         commits = resp.json().get("commits") or []
         return [
             c.get("commit", {}).get("message", "").split("\n")[0]
-            for c in commits if c.get("commit", {}).get("message")
+            for c in commits
+            if c.get("commit", {}).get("message")
         ]
     except Exception as e:
         print(f"[deploy_notice] changelog error: {e}")
@@ -63,7 +67,11 @@ def notify_once() -> None:
 
     if redis is not None:
         try:
-            claimed = redis.set(_key(sha), "1", nx=True, ex=86400)
+            # No TTL: a deploy notification should fire exactly once per SHA,
+            # forever. The previous 24-hour expiry meant cold starts arriving
+            # more than a day after deploy would re-claim the key and DM the
+            # admin again even though nothing had actually been redeployed.
+            claimed = redis.set(_key(sha), "1", nx=True)
             if not claimed:
                 _DONE_THIS_PROCESS = True
                 return

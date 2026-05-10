@@ -6,6 +6,7 @@ secret we put in the Vercel env and on every registered hook). A valid
 push triggers a targeted re-ingest of the changed paths only — full-repo
 sync is only on /git add and /git sync.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -28,9 +29,14 @@ def _verify(sig_header: str, body: bytes) -> bool:
         return False
     if not sig_header or not sig_header.startswith("sha256="):
         return False
-    expected = "sha256=" + hmac.new(
-        GITHUB_WEBHOOK_SECRET.encode("utf-8"), body, hashlib.sha256,
-    ).hexdigest()
+    expected = (
+        "sha256="
+        + hmac.new(
+            GITHUB_WEBHOOK_SECRET.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
     return hmac.compare_digest(sig_header, expected)
 
 
@@ -70,18 +76,45 @@ def github_webhook():
         return ("branch ignored", 200)
 
     added_mod = gh.changed_paths_from_push(payload)
-    removed   = gh.removed_paths_from_push(payload)
+    removed = gh.removed_paths_from_push(payload)
+
+    # A single push can touch dozens of files (squash merges, generated
+    # files, mass-renames). Inline ingest fits ~10 files inside Vercel's
+    # 60s cap once tree-walk + per-file blob fetches + embeddings are
+    # accounted for; above that we hand off to the QStash batch path so
+    # each callback only ingests BATCH_SIZE files.
+    INLINE_THRESHOLD = 10
 
     n_added = 0
     n_removed = 0
+    queued = False
     if added_mod:
-        result = git_ingest.sync_repo(
-            owner, repo, tracked_branch or None,
-            added_by="github-webhook", paths=added_mod,
-        )
-        n_added = result.get("files_added", 0)
+        if len(added_mod) > INLINE_THRESHOLD:
+            result = git_ingest.enqueue_paths(
+                owner,
+                repo,
+                tracked_branch or "",
+                added_mod,
+                added_by="github-webhook",
+            )
+            queued = bool(result.get("queued"))
+            # Record the queued count as "added" for response visibility;
+            # the actual indexing happens asynchronously.
+            n_added = result.get("files_total", 0)
+        else:
+            result = git_ingest.sync_repo(
+                owner,
+                repo,
+                tracked_branch or None,
+                added_by="github-webhook",
+                paths=added_mod,
+            )
+            n_added = result.get("files_added", 0)
     if removed:
         n_removed = git_ingest.remove_synced_paths(owner, repo, removed)
 
-    return (json.dumps({"added": n_added, "removed": n_removed}), 200,
-            {"Content-Type": "application/json"})
+    return (
+        json.dumps({"added": n_added, "removed": n_removed, "queued": queued}),
+        200,
+        {"Content-Type": "application/json"},
+    )
