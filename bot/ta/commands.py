@@ -7,11 +7,13 @@ stages add /doc, /quiz, /stats, /grade, /announce, /purge, /reveal.
 from __future__ import annotations
 
 import html
+import io
 import random
 import time
 from typing import Callable
 
 from bot import github as gh
+from bot import voice as voice_module
 from bot.clients import bot as _bot
 from bot.config import (
     BOT_ENV,
@@ -55,6 +57,7 @@ from bot.ta.state import (
     reset_group_stats,
     set_active_group_id,
     set_active_model,
+    set_voice_speaker,
 )
 from bot.ta.tg import send_message
 
@@ -122,6 +125,10 @@ def _cmd_help(p: Prepared) -> None:
         "/model — list models, mark active",
         "/model &lt;name&gt; — switch chat model",
         "/reset — clear history + reset model for active group",
+        "",
+        "<b>Voice</b>",
+        "/voice — list voices, mark active",
+        "/voice &lt;name&gt; — switch bot voice (audio preview to your DM)",
         "",
         "<b>Knowledge</b>",
         "/doc — list indexed docs",
@@ -316,6 +323,77 @@ def _cmd_model(p: Prepared) -> None:
         f"<code>{p.group_key}</code>.",
         parse_mode="HTML",
     )
+
+
+# ── /voice [name] ─────────────────────────────────────────────────────────
+@_register("voice")
+def _cmd_voice(p: Prepared) -> None:
+    """List or set the bot's TTS voice. On set, DM an audio preview in the new voice.
+
+    Storage is global (one bot voice across all chats), keyed under
+    ``REDIS_PREFIX``. Validates against ``voice.AURA_SPEAKERS`` so a typo
+    can't poison the live config.
+    """
+    args = p.command_args.strip().lower()
+    if not args:
+        current = voice_module.get_active_speaker()
+        lines = ["<b>Bot voice</b>"]
+        for s in voice_module.AURA_SPEAKERS:
+            gender = voice_module.AURA_SPEAKER_GENDERS.get(s, "?")
+            marker = " (active)" if s == current else ""
+            lines.append(f"• <code>{s}</code> — {gender}{marker}")
+        lines.append("")
+        lines.append("Switch: /voice &lt;name&gt;")
+        send_message(p.user_id, "\n".join(lines), parse_mode="HTML")
+        return
+
+    choice = args.split()[0]
+    if choice not in voice_module.AURA_SPEAKERS:
+        send_message(
+            p.user_id,
+            f"Invalid voice: <code>{html.escape(choice)}</code>\n"
+            f"Valid options: {', '.join(voice_module.AURA_SPEAKERS)}",
+            parse_mode="HTML",
+        )
+        return
+
+    set_voice_speaker(choice)
+
+    if not voice_module.is_enabled():
+        send_message(
+            p.user_id,
+            f"✅ Voice set to <code>{choice}</code>. "
+            "(TTS not configured — set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN to enable audio.)",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        audio = voice_module.synthesize(
+            f"Voice set to {choice.title()}. This is how I will sound from now on.",
+            speaker=choice,
+        )
+    except Exception as e:
+        print(f"[ta.commands] /voice synthesis error: {e}")
+        send_message(
+            p.user_id,
+            f"✅ Voice set to <code>{choice}</code>, but the audio preview failed.",
+            parse_mode="HTML",
+        )
+        return
+
+    buf = io.BytesIO(audio)
+    buf.name = "voice_preview.mp3"
+    try:
+        _bot.send_voice(p.user_id, buf, caption=f"✅ Voice set to {choice}")
+    except Exception as e:
+        print(f"[ta.commands] /voice send_voice error: {e}")
+        send_message(
+            p.user_id,
+            f"✅ Voice set to <code>{choice}</code>. "
+            f"Couldn't deliver audio preview: {html.escape(str(e))}",
+            parse_mode="HTML",
+        )
 
 
 # ── /group [N|chatId|list] ────────────────────────────────────────────────

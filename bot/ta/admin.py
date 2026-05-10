@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import traceback
 
-from bot.clients import bot
 from bot.config import TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
 from bot.ta import announcements, commands, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
@@ -293,4 +292,4 @@ def _answer_question(p: Prepared) -> None:
         print(f"[ta.admin] _answer_question error: {e}")
         traceback.print_exc()
         if addressed:
-            bot.send_message(p.chat_id, "Something went wrong. Please try again.")
+            send_message(p.chat_id, "Something went wrong. Please try again.")

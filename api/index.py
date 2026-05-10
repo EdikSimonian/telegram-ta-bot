@@ -1,4 +1,5 @@
 import hmac
+import traceback
 
 import telebot
 from flask import Flask, jsonify, request
@@ -35,7 +36,10 @@ def webhook():
             return "Forbidden", 403
     notify_once()
     update = telebot.types.Update.de_json(request.get_data(as_text=True))
-    bot.process_new_updates([update])
+    try:
+        bot.process_new_updates([update])
+    except Exception:
+        traceback.print_exc()
     return "OK", 200
 
 

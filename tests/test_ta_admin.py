@@ -6,6 +6,7 @@ not internals: each test names the rule it exercises.
 """
 
 from unittest.mock import MagicMock, patch
+from contextlib import nullcontext
 
 
 def _msg(
@@ -106,6 +107,26 @@ def _enter(stack):
 def _exit(stack):
     for cm in reversed(stack):
         cm.__exit__(None, None, None)
+
+
+def test_answer_send_failure_uses_safe_error_reply():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ai.answer", return_value="hello"),
+            patch("bot.helpers.keep_typing", return_value=nullcontext()),
+            patch("bot.helpers.send_reply", side_effect=RuntimeError("telegram 400")),
+            patch("bot.ta.admin.send_message") as safe_send,
+        ):
+            from bot.ta.admin import route
+
+            route(_msg(chat_type="private", chat_id=42, text="What is Python?"))
+            safe_send.assert_called_once_with(
+                42, "Something went wrong. Please try again."
+            )
+    finally:
+        _exit(stack)
 
 
 # ── Rule 3: /start is a no-op (or re-welcome in DM) ───────────────────────

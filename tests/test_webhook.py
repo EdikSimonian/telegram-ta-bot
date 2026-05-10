@@ -33,6 +33,26 @@ def test_webhook_accepts_correct_secret():
         assert result == ("OK", 200)
 
 
+def test_webhook_returns_ok_when_handler_raises():
+    """A bad Telegram update should not make Telegram retry it forever."""
+    mock_request = MagicMock()
+    mock_request.headers.get.return_value = "correct_secret"
+    mock_request.get_data.return_value = "{}"
+    mock_bot = MagicMock()
+    mock_bot.process_new_updates.side_effect = RuntimeError("handler failed")
+    with (
+        patch("api.index.WEBHOOK_SECRET", "correct_secret"),
+        patch("api.index.request", mock_request),
+        patch("api.index.bot", mock_bot),
+        patch("api.index.telebot") as mock_telebot,
+    ):
+        mock_telebot.types.Update.de_json.return_value = MagicMock()
+        from api.index import webhook
+
+        result = webhook()
+        assert result == ("OK", 200)
+
+
 def test_webhook_skips_validation_when_no_secret_in_local_env():
     """Local dev (BOT_ENV=local) is allowed to run without WEBHOOK_SECRET —
     polling-driven dev sessions don't need spoof protection."""

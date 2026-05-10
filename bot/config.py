@@ -194,3 +194,20 @@ RAG_CHUNK_SIZE = 800
 RAG_CHUNK_OVERLAP = 100
 RAG_TOP_K = 5
 RAG_MIN_SCORE = 0.6
+
+# ── Voice (Cloudflare Workers AI: Whisper-turbo STT + Aura-1 TTS) ─────────
+# Free tier is account-wide ~10,000 neurons/day. Both vars must be set for
+# voice in/out to engage; absent either, voice handlers short-circuit with
+# a polite text nudge.
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+# Reject voice messages longer than this (seconds). Caps individual cost
+# and keeps end-to-end latency comfortably inside Vercel's 60s function cap.
+MAX_VOICE_SECONDS = int(os.environ.get("MAX_VOICE_SECONDS", "30"))
+# Replies above this length fall back to text. A 1000-char reply runs
+# ~50s as voice — anything longer is bad UX in chat. Aura-1 is also
+# English-only, so non-English replies always fall back to text.
+VOICE_REPLY_MAX_CHARS = int(os.environ.get("VOICE_REPLY_MAX_CHARS", "1000"))
+# Aura-1 speakers: angus, asteria, arcas, orion, orpheus, athena, luna,
+# zeus, perseus, helios, hera, stella. "angus" is a warm male voice.
+VOICE_REPLY_SPEAKER = os.environ.get("VOICE_REPLY_SPEAKER", "angus").strip()

@@ -806,6 +806,26 @@ def clear_active_model(group_key: str) -> None:
     _safe(lambda: redis.delete(_k_active_model(group_key)))
 
 
+# ── Voice speaker (global; one bot voice across all chats) ───────────────
+# A single key, not per-group: the bot has one voice persona, controlled
+# by the instructor via /voice. Falls back to VOICE_REPLY_SPEAKER env var
+# when unset.
+def _k_voice_speaker() -> str:
+    return f"{_P}voiceSpeaker"
+
+
+def get_voice_speaker() -> str | None:
+    return _safe(lambda: redis.get(_k_voice_speaker()), default=None)
+
+
+def set_voice_speaker(speaker: str) -> None:
+    _safe(lambda: redis.set(_k_voice_speaker(), speaker))
+
+
+def clear_voice_speaker() -> None:
+    _safe(lambda: redis.delete(_k_voice_speaker()))
+
+
 # ── Announcements (pending two-step flow) ─────────────────────────────────
 PENDING_ANNOUNCEMENT_TTL = 3600
 

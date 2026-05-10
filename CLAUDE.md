@@ -6,269 +6,326 @@ This file describes the architecture, conventions, and deployment process for th
 
 ## What this project is
 
-A serverless Telegram bot template built for students. It runs on Vercel's free tier, uses Cerebras (or any OpenAI-compatible API) for AI responses, and Upstash Redis for per-user conversation memory.
+A serverless **Teaching Assistant Telegram bot** for the Summer 2026 AI Bot Workshop in Armenia, led by Edik Simonian (`@ediksimonian`). It joins course Telegram groups and answers student questions using RAG over instructor-uploaded course material, runs interactive quizzes with QStash-scheduled auto-reveal, and offers a wide instructor-only admin command suite.
 
-**Stack:** Python 3.12 · Flask · pyTelegramBotAPI · OpenAI SDK · Upstash Redis · Vercel
+The repository started life as a generic "Telegram + Vercel" template and still wears some of that shape (`run_local.py`, the Makefile structure, the `bot/` layout). Most domain logic now lives under `bot/ta/`.
+
+**Stack:** Python 3.12 · Flask · pyTelegramBotAPI · OpenAI SDK (LLM + embeddings) · Upstash Redis (state) · Upstash Vector (RAG) · Upstash QStash (delayed callbacks) · Vercel Blob (doc storage) · Vercel Functions (runtime).
 
 ---
 
 ## Project structure
 
 ```
-telegram-vercel-bot/
-├── api/
-│   └── index.py          # Vercel entrypoint — Flask app, webhook route, /api/health, secret verification
+tabot/
+├── api/                          # Vercel function entrypoints
+│   ├── index.py                  # Flask app — /api/webhook, /api/health, /api/notify-admin
+│   ├── autoreveal.py             # QStash callback — quiz auto-reveal after timeout
+│   ├── github.py                 # GitHub webhook receiver — re-ingest on push
+│   └── git_sync_batch.py         # QStash callback — batched repo file ingest
 ├── bot/
 │   ├── __init__.py
-│   ├── config.py         # All env vars and constants (edit this to configure the bot)
-│   ├── clients.py        # Instantiates bot, ai, redis clients (do not edit unless adding a client)
-│   ├── ai.py             # ask_ai() orchestration — history, search injection, source citations
-│   ├── providers.py      # Provider dispatch: OpenAI-compatible (with retry) or HF Gradio space
-│   ├── preferences.py    # Per-user provider preference stored in Redis
-│   ├── search.py         # Tavily web search with Redis result caching
-│   ├── history.py        # get/save/clear conversation history in Redis (graceful degradation)
-│   ├── rate_limit.py     # Per-user daily message rate limiting via Redis (graceful degradation)
-│   ├── helpers.py        # send_reply(), keep_typing() context manager, should_respond() utilities
-│   └── handlers.py       # All Telegram command and message handlers — add new commands here
-├── tests/
-│   ├── conftest.py       # Mocks env vars and external packages (telebot, openai, upstash_redis, flask)
-│   ├── test_ai.py        # needs_search(), ask_ai() orchestration + source citations
-│   ├── test_providers.py # _call_main() retry, _call_hf() prompt handling, generate() dispatch
-│   ├── test_preferences.py # get/set_provider() including Redis failures and HF_SPACE_ID fallback
-│   ├── test_handlers.py  # handle_message() — typing, error handling, rate limit, None text
-│   ├── test_helpers.py
-│   ├── test_history.py   # includes graceful degradation (Redis down) tests
-│   ├── test_rate_limit.py # includes graceful degradation test
-│   ├── test_search.py    # web_search() including cache hit/miss and Redis failure tests
-│   └── test_webhook.py   # webhook secret validation (accept, reject, skip)
-├── .github/
-│   └── workflows/
-│       └── ci.yml        # Runs pytest on every push and pull request
-├── .env.example          # Template for required environment variables
-├── run_local.py          # Run the bot locally via polling (no Vercel, no webhook) — for learning + dev
-├── Makefile              # install / test / deploy shortcuts
+│   ├── config.py                 # ALL env vars + system prompt + RAG/quiz knobs
+│   ├── clients.py                # Singleton bot/ai/embeddings/redis/vector clients
+│   ├── ai.py                     # ask_ai() — RAG retrieve → history → OpenAI → persist
+│   ├── search.py                 # Tavily web-search fallback (only when RAG misses)
+│   ├── blob.py                   # Vercel Blob adapter with BLOB_PATH_PREFIX isolation
+│   ├── qstash.py                 # QStash publish + JWT signature verify (rotation-aware)
+│   ├── github.py                 # GitHub REST client (list_tree, fetch_blob, parse_repo_url)
+│   ├── handlers.py               # Webhook router → bot.ta.admin.route()
+│   ├── helpers.py                # Telegram message splitter, typing-indicator refresh
+│   ├── deploy_notice.py          # One-shot DM to admin on first /api/health hit per deploy
+│   └── ta/                       # Teaching-assistant domain logic
+│       ├── admin.py              # 12-step dispatch precedence (the request-routing brain)
+│       ├── commands.py           # /help /info /admin /quiz /doc /git etc. — 20 commands
+│       ├── state.py              # All Redis-backed state (admins, groups, history, quizzes…)
+│       ├── prepare.py            # Telegram update → Prepared dataclass; admin/instructor checks
+│       ├── tg.py                 # Centralized Telegram wrappers w/ error handling
+│       ├── rag.py                # chunk → embed → upsert / retrieve top-k from Upstash Vector
+│       ├── quiz.py               # /quiz generation, A–D answering, /reveal, QStash scheduling
+│       ├── docs.py               # /doc add/list/update/delete — Blob + Vector + Redis index
+│       ├── git_ingest.py         # GitHub repo ingest (sync small / async via QStash for large)
+│       ├── announcements.py      # /announce — stage, DM preview, "send it" confirm
+│       ├── stats.py              # Engagement scoring + inactive-user flagging
+│       ├── welcome.py            # Group + DM welcome messages
+│       ├── joke.py               # /joke
+│       ├── guardrail.py          # Strip <think>, drop hedging, suppress IGNORE
+│       └── upgrade.py            # /upgrade — fires Claude Code Routine to PR a change
+├── tests/                        # 29 test files; conftest.py mocks external libs at sys.modules
+├── .github/workflows/ci.yml      # Pytest on push + PR
+├── .env.example                  # Template (TA bot stack — Vector, QStash, Blob, etc.)
+├── run_local.py                  # Local polling runner (no Vercel) — auto-loads .env
+├── Makefile                      # install / test / run / deploy / push (+ -prod / -test variants)
 ├── requirements.txt
-├── vercel.json           # Rewrites /api/webhook → api/index.py
-├── CLAUDE.md             # Agent-readable project guide (this file)
-└── README.md             # Student-facing setup guide
+├── vercel.json                   # Rewrites + per-function maxDuration + Python runtime pin
+├── CLAUDE.md                     # This file
+└── README.md                     # Student-facing setup guide
 ```
 
 ---
 
 ## How the bot works
 
-1. Telegram sends a POST to `https://<vercel-url>/api/webhook` on every message
-2. `vercel.json` rewrites that path to `api/index.py` (Vercel only recognises specific filenames as Flask entrypoints — `index.py` is one of them). `/api/health` is also rewritten to the same function and returns `OK` 200 for uptime checks
-3. `api/index.py` validates the `X-Telegram-Bot-Api-Secret-Token` header (if `WEBHOOK_SECRET` is set), then deserialises the update and passes it to pyTelegramBotAPI
-4. pyTelegramBotAPI routes to the correct handler in `bot/handlers.py`
-5. For text messages: checks `should_respond()` → checks rate limit → enters `keep_typing()` context manager (a background thread re-sends the Telegram "typing" action every 4s so the indicator stays alive during slow HF generations) → calls `ask_ai()` → exits context (stops thread) → sends reply
-6. `ask_ai()` loads history from Redis, checks `needs_search()` for keywords, optionally calls `web_search()` (which checks the Redis cache first), prepends results as a system message, dispatches to `generate()` in `bot/providers.py` which calls `_call_main()` (with retry logic) or `_call_hf()` depending on user preference, appends source citations to the reply, saves updated history
+1. Telegram POSTs every `message` / `edited_message` / `my_chat_member` update to `https://<vercel-url>/api/webhook`.
+2. `vercel.json` rewrites `/api/webhook` → `api/index.py` (Vercel only auto-detects Flask apps in specific filenames; `index.py` is one of them).
+3. `api/index.py` validates `X-Telegram-Bot-Api-Secret-Token` against `WEBHOOK_SECRET` (fail-closed unless local), deserialises the update, and hands it to pyTelegramBotAPI.
+4. The single text handler in `bot/handlers.py` calls `bot.ta.admin.route(message)`. The 12-step precedence in `bot/ta/admin.py` is the routing brain — see next section.
+5. For a question that survives the gates, `bot/ai.py::ask_ai()` runs:
+   - `bot.ta.rag.retrieve()` — embed the query, ANN-search Upstash Vector top-K, filter by `RAG_MIN_SCORE`
+   - `bot.ta.state.get_history()` — load group-level conversation history from Redis
+   - Compose: system prompt + numbered RAG context + history + prefixed user message
+   - Call OpenAI with the group's active model (`get_active_model()`) or `DEFAULT_MODEL`
+   - Optional Tavily fallback if RAG returned nothing AND `needs_search()` matched a date/recency keyword AND `TAVILY_API_KEY` is set
+   - `bot.ta.guardrail` strips `<think>` blocks and suppresses `IGNORE` / hedging
+   - Persist user + assistant turns via `append_history()`
 
-**Critical:** `telebot.TeleBot` must be created with `threaded=False`. Without this, handlers run in threads that are killed when the serverless function returns — the bot receives the message but never replies. `threaded=False` is also fine for local polling (`run_local.py`) — updates just process sequentially in the main thread.
+**Critical:** `telebot.TeleBot` is created with `threaded=False`. Without this, handlers run in threads that get killed when the serverless function returns — the message is received but never replied. `threaded=False` is also fine for local polling.
 
-**Local development mode:** `run_local.py` at the repo root runs the exact same `bot/` modules via `bot.infinity_polling()` instead of the webhook. It auto-loads `.env` with a zero-dependency inline loader, calls `bot.remove_webhook()` to release any registered production webhook, then blocks on polling. Use this for teaching, prototyping, or iterating without redeploying. Any webhook registered against the same bot token must be re-registered via `setWebhook` after you stop polling, otherwise production will stay silent.
+---
+
+## The admin router (`bot/ta/admin.py`)
+
+`route()` walks a 12-step precedence list. Earlier steps are cheaper and short-circuit on hit, so RAG/LLM cost is only paid when nothing else handles the message:
+
+1. `/start` — DM welcome.
+2. New DM user — first-time DM welcome.
+3. Pending announcement confirmation (`/announce` two-step flow).
+4. Admin command — instructor-gated registry in `bot/ta/commands.py`.
+5. Active quiz answer (A–D in a group with a live quiz).
+6. `@<bot>` mention or reply-to-bot — forced direct response.
+7. Rate-limit gate — `TA_RATE_LIMIT` per `TA_RATE_LIMIT_WINDOW` (rolling, per student).
+8. Question pre-gate — regex for question marks (`?`, Armenian `՞`, Arabic `؟`) + interrogative starters; non-questions fall through silently.
+9. RAG retrieve.
+10. LLM call.
+11. Guardrail post-process.
+12. Persist + reply.
+
+The system prompt (in `bot/config.py::SYSTEM_PROMPT`) instructs the model to respond `IGNORE` for chatter / off-topic / cross-student messages. The guardrail enforces that; only `@`-mentions / replies / DMs bypass the IGNORE filter.
+
+---
+
+## Multi-bot isolation
+
+A single Upstash Redis DB / Vector index / Blob store can host **multiple deployments** (typically prod + test) without collisions. Three independent prefixes:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `REDIS_PREFIX` | `ta:` | Prepended to every Redis key |
+| `VECTOR_NAMESPACE` | `""` (default ns) | Upstash Vector namespace |
+| `BLOB_PATH_PREFIX` | `docs/` | Prepended to every Blob path |
+| `BOT_ENV` | `local` | Free-form label surfaced in `/info` and logs |
+
+Use `ta:prod:` / `ta:test:` (and matching namespace / blob prefix / `BOT_ENV=prod`) to safely run two bots against one set of upstream services.
 
 ---
 
 ## Environment variables
 
-| Variable | Required | Default | Description |
+Read in `bot/config.py`. Every value is `.strip()`-ed to defend against trailing newlines from CLI piping.
+
+| Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | — | From @BotFather on Telegram |
-| `AI_API_KEY` | Yes | — | API key for the AI provider |
-| `UPSTASH_REDIS_REST_URL` | No | — | From Upstash console. When unset, bot runs in **stateless mode** (no memory, no rate limit, no provider preferences, no search cache) |
-| `UPSTASH_REDIS_REST_TOKEN` | No | — | From Upstash console |
-| `AI_BASE_URL` | No | `https://api.cerebras.ai/v1` | Any OpenAI-compatible base URL |
-| `AI_MODEL` | No | `llama3.1-8b` | Model name for the provider |
-| `TAVILY_API_KEY` | No | — | From tavily.com — enables web search when set |
-| `HF_SPACE_ID` | No | — | Hugging Face Gradio space ID (e.g. `edisimon/armgpt-demo`) — enables `/model` command when set |
-| `HF_TOKEN` | No | — | HF auth token — only needed if the Gradio space is private or gated |
-| `WEBHOOK_SECRET` | No | — | Random string to verify requests come from Telegram |
-| `RATE_LIMIT` | No | `250` | Max messages per user per day |
+| `TELEGRAM_BOT_TOKEN` | Yes | — | From @BotFather |
+| `AI_API_KEY` | Yes | — | OpenAI API key |
+| `AI_BASE_URL` | No | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
+| `AI_MODEL` | No | `gpt-5.4-nano` | Default LLM (must be in `VALID_MODELS`: `gpt-5.4-nano`, `gpt-5.4-mini`, `gpt-5.5`) |
+| `QUIZ_MODEL` | No | `AI_MODEL` | Optional override for quiz generation |
+| `EMBEDDINGS_PROVIDER` | No | `openai` | Embeddings backend |
+| `EMBEDDINGS_MODEL` | No | `text-embedding-3-small` | Embedding model |
+| `UPSTASH_REDIS_REST_URL` | Stateful | — | Required for memory, quizzes, admin, rate limit, docs index |
+| `UPSTASH_REDIS_REST_TOKEN` | Stateful | — | — |
+| `UPSTASH_VECTOR_REST_URL` | RAG | — | Required for `/doc`, `/git`, RAG retrieval |
+| `UPSTASH_VECTOR_REST_TOKEN` | RAG | — | — |
+| `VECTOR_NAMESPACE` | No | `""` | Upstash Vector namespace |
+| `QSTASH_URL` | Quiz reveal | `https://qstash.upstash.io` | Use the regional URL for lower latency |
+| `QSTASH_TOKEN` | Quiz reveal | — | — |
+| `QSTASH_CURRENT_SIGNING_KEY` | Quiz reveal | — | JWT verify (rotation-aware) |
+| `QSTASH_NEXT_SIGNING_KEY` | Quiz reveal | — | JWT verify after rotation |
+| `BLOB_READ_WRITE_TOKEN` | Docs | — | Required for `/doc add` |
+| `BLOB_PATH_PREFIX` | No | `docs/` | Multi-bot isolation |
+| `REDIS_PREFIX` | No | `ta:` | Multi-bot isolation |
+| `BOT_ENV` | No | `local` | Label for `/info` (`prod` / `test` / etc.) |
+| `PERMANENT_ADMIN` | No | `ediksimonian` | Username (lowercase) — fallback only |
+| `PERMANENT_ADMIN_ID` | **Strongly recommended** | — | Numeric Telegram user ID — primary admin gate |
+| `INSTRUCTOR_NAME` | No | `Edik Simonian` | Used in welcome + system prompt |
+| `TA_RATE_LIMIT` | No | `10` | Per-student questions per window |
+| `TA_RATE_LIMIT_WINDOW` | No | `3600` (sec) | Rolling-window length |
+| `RATE_LIMIT` | No | `250` | Legacy daily cap (polling runner) |
+| `QUIZ_TIMEOUT_MINUTES` | No | `3` | Auto-reveal delay |
+| `TAVILY_API_KEY` | No | — | Enables web-search fallback |
+| `GITHUB_TOKEN` | No | — | PAT for private repos / 60-rph limit |
+| `GITHUB_WEBHOOK_SECRET` | No | — | HMAC-SHA256 for `api/github.py` |
+| `CLAUDE_ROUTINE_ID` | No | — | Powers `/upgrade` — Claude Code Routine that PRs the change |
+| `CLAUDE_ROUTINE_TOKEN` | No | — | — |
+| `WEBHOOK_SECRET` | No | — | Telegram secret-token header verification |
+| `HF_SPACE_ID` | No | — | Legacy HF Gradio fallback (rarely set) |
+| `HF_TOKEN` | No | — | — |
+| `PROD_URL` | Local-only | — | Used by `make push` to register webhook + by code to build QStash callback URLs |
+| `VERCEL_ORG_ID` | Local-only | — | Required by `make deploy` / `make push` |
+| `VERCEL_PROJECT_ID` | Local-only | — | Required by `make deploy` / `make push` |
 
-All env vars are read in `bot/config.py`. `.strip()` is called on every value — this prevents subtle bugs from trailing newlines when setting vars via CLI pipes.
-
----
-
-## AI provider
-
-The bot uses the OpenAI Python SDK pointed at any OpenAI-compatible endpoint. Switching providers only requires changing `AI_BASE_URL` and `AI_MODEL` (via env vars — no code change needed).
-
-**Known working providers (free tier):**
-
-| Provider | Base URL | Notes |
-|---|---|---|
-| Cerebras | `https://api.cerebras.ai/v1` | Default. Confirmed working on free tier: `llama3.1-8b`, `qwen-3-235b-a22b-instruct-2507`. Also: `gpt-oss-120b` (may be gated) |
-| Groq | `https://api.groq.com/openai/v1` | 14,400 req/day free. Model: `llama-3.1-8b-instant` |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | Model: `gemini-2.5-flash` (250 req/day) |
-
-**Cerebras model IDs** (exact strings — wrong format causes 404):
-- `llama3.1-8b` ✓ (note: dot not dash, no space). Fast, small, good default for snappy chat
-- `qwen-3-235b-a22b-instruct-2507` ✓ verified working on free tier. Much stronger reasoning and multilingual than the 8B, but slower per-token. This is the current `.env.example` default — kids notice the quality jump immediately when they switch
-- `gpt-oss-120b` ✓ (may require special access on new accounts)
-
----
-
-## Web search
-
-Web search is powered by the Tavily Search API (`bot/search.py`) and injected as context in `bot/ai.py`.
-
-- **Opt-in:** only active when `TAVILY_API_KEY` is set. Without it the bot works normally with no code changes needed
-- **Safe search:** always `strict` — hardcoded in `bot/search.py`, not configurable
-- **How it works:** `needs_search()` checks the user message for keywords (today, latest, news, etc.). If matched, Tavily is called and results are prepended as a system message before the AI call
-- **Caching:** results are cached in Redis for 10 minutes by query hash — duplicate queries skip Tavily entirely
-- **User visibility:** replies include a **Sources:** footer with clickable `[Title](url)` links for every result used
-- **Free tier:** 1,000 searches/month, no credit card required
-- **Getting a key:** go to `tavily.com` → sign up → API Keys → Create API Key
-
-**Adding the key to Vercel:**
-```bash
-vercel env add TAVILY_API_KEY --value "your_key" --force --yes
-vercel --prod
-```
+`PROD_URL` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID` are local-only orchestration metadata — `make push` skips them when syncing to Vercel.
 
 ---
 
-## Multi-provider support
+## Commands (instructor-gated unless noted)
 
-The bot can dispatch requests to one of two providers per user. Provider identifiers are **`main`** and **`hf`** — both in code (`VALID_PROVIDERS`, `DEFAULT_PROVIDER`, Redis values) and in the user-facing `/model` command:
+`/help`, `/info` (open to anyone) · `/admin add|remove|list` · `/reset` · `/model [list|set <id>]` · `/group <add|remove|active>` · `/doc <add|list|update|delete>` · `/git <add|list|remove>` · `/quiz [topic]` (open) · `/reveal` (open) · `/joke [theme]` (open) · `/roll` (open) · `/stats` · `/grade` · `/announce <text>` · `/dm <user> <text>` · `/vstats` · `/purge` · `/upgrade <instruction>` · `/feedback`
 
-1. **`main`** (default) — any OpenAI-compatible endpoint via `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL`. `_call_main()` in `bot/providers.py` has retry logic (3 attempts with exponential backoff: 1s, 2s). Named "main" rather than "openai" to avoid confusing kids who might think it's tied to OpenAI Inc. — the endpoint is *OpenAI-compatible* (a protocol) but the actual provider is usually Cerebras or similar.
-2. **`hf`** (optional) — a Hugging Face Gradio space set via `HF_SPACE_ID` (with optional `HF_TOKEN` for private spaces). Called via `gradio_client.Client(...).predict(prompt, length, temperature, top_k, api_name="/generate")`. No retry (HF is slow).
+Registry lives in `bot/ta/commands.py`; each command supports sub-commands routed by prefix match.
 
-**When `HF_SPACE_ID` is empty, the bot works exactly as before** — the `/model` command is not registered and users always hit the main (OpenAI-compatible) endpoint.
+---
 
-**When `HF_SPACE_ID` is set**, users get a `/model` command:
-- `/model` — show current provider + options
-- `/model main` — switch to the OpenAI-compatible endpoint
-- `/model hf` — switch to the HF space
+## RAG pipeline
 
-Preferences are stored in Redis under `provider:{user_id}` (no TTL). If Redis is down or not configured (stateless mode), the bot falls back to `DEFAULT_PROVIDER` (`"main"`). **Migration note:** any existing Redis entries with value `"openai"` will now fail the `VALID_PROVIDERS` check in `preferences.py` and automatically fall back to the default (`"main"`), which is the same provider — no user-visible impact.
+- **Knobs** (`bot/config.py`): `RAG_CHUNK_SIZE=800`, `RAG_CHUNK_OVERLAP=100`, `RAG_TOP_K=5`, `RAG_MIN_SCORE=0.6`.
+- **Ingest** (`bot/ta/rag.py::ingest`): chunk text by char count with overlap → embed via `text-embedding-3-small` → upsert into Upstash Vector under `VECTOR_NAMESPACE`.
+- **Retrieve**: embed query → ANN search top-K → drop matches below `RAG_MIN_SCORE` → format as numbered `[N] Title — chunk` blocks the model can cite.
+- **Sources**: model emits `SOURCES_USED: 1,3` trailer; `bot/ai.py` parses it and appends a clickable `**Sources:**` footer to the reply.
+- **Doc storage** (`bot/ta/docs.py`): the original text lives in Vercel Blob (`docs/<slug>.md`), chunks live in Vector, and the doc index lives in Redis.
 
-**HF provider caveats** — the current target (`edisimon/armgpt-demo`, ArmGPT) has:
-- Base completion model, not a chat model — `bot/providers.py::_last_user_message` extracts only the most recent user message and passes it as a bare prompt. Chat transcripts (`"User: ...\nAssistant: ..."`) would just confuse it since it was trained on raw Armenian text with no turn structure
-- No system prompt support — the system prompt is dropped entirely for HF
-- No conversation memory — only the latest user turn is sent
-- Hardcoded knobs (`bot/providers.py`) — `HF_LENGTH=100`, `HF_TEMPERATURE=0.6`, `HF_TOP_K=30`. Tuned so generation finishes inside Telegram's ~60s webhook window and Vercel's 60s function cap with cold-start headroom
-- Output is a `(html_output, status_text)` tuple — `_call_hf` takes index 0, strips HTML tags, and strips the echoed prompt prefix if present
-- No web search — `bot/ai.py::ask_ai` skips Tavily injection when provider is `hf` (the ArmGPT model is Armenian-only; English search results would just pollute the prompt)
-- Cold start on free HF tier can take 30–60s while the model downloads — `keep_typing()` in `bot/helpers.py` keeps the Telegram typing indicator alive throughout
+---
 
-To switch to a different HF space, change `HF_SPACE_ID` and confirm the target space exposes a `/generate` API with the same signature, or adapt `_call_hf` in `bot/providers.py`.
+## Quiz system
+
+- `/quiz [topic]` — `bot/ta/quiz.py` calls `QUIZ_MODEL` to generate a multiple-choice question (A–D), saves the answer + `correct_index` to Redis, posts to the group, schedules a QStash callback to `/api/autoreveal` at `now + QUIZ_TIMEOUT_MINUTES`.
+- Students answer with a bare letter (A–D) — caught at admin-router step 5.
+- `/api/autoreveal` (QStash callback) verifies the JWT against `QSTASH_CURRENT_SIGNING_KEY` (with `NEXT` fallback for rotation), checks the quiz hasn't already been revealed (idempotent), reveals the answer + per-student tally.
+- Inline fallback: if the QStash callback is missed (rare), the next inbound message in the group triggers a stale-quiz check and reveals inline.
+
+---
+
+## GitHub ingest
+
+- `/git add <repo-url>` — `bot/ta/git_ingest.py` lists the tree, decides sync vs async by file count.
+  - **Small repos** ingest in one webhook turn.
+  - **Large repos** publish a QStash batch to `/api/git-sync-batch`, which processes up to `BATCH_SIZE` files and chains follow-up jobs until the tree is exhausted, then DMs the instructor.
+- **Auto re-sync**: register a GitHub webhook pointing at `/api/github` with `GITHUB_WEBHOOK_SECRET` shared. On `push`, `api/github.py` re-ingests only the changed paths.
+- Slug format: `gh-{owner}-{repo}-{path-slug}`.
+- Binary / large files are silently skipped during text extraction.
 
 ---
 
 ## Webhook verification
 
-To block spoofed requests, set a random secret and pass it when registering the webhook:
+When `WEBHOOK_SECRET` is set, every `/api/webhook` POST is rejected with 403 unless `X-Telegram-Bot-Api-Secret-Token` matches. `make push` registers the webhook with the same secret in `setWebhook`.
 
 ```bash
-vercel env add WEBHOOK_SECRET --value "your_random_secret" --force --yes
-vercel --prod
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<VERCEL_URL>/api/webhook&secret_token=your_random_secret"
+curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+  --data-urlencode "url=https://<VERCEL_URL>/api/webhook" \
+  --data-urlencode "secret_token=<WEBHOOK_SECRET>" \
+  --data-urlencode 'allowed_updates=["message","edited_message","my_chat_member"]'
 ```
-
-When `WEBHOOK_SECRET` is set, `api/index.py` checks the `X-Telegram-Bot-Api-Secret-Token` header on every request and returns 403 if it does not match. If the variable is not set, verification is skipped (backwards compatible).
 
 ---
 
 ## Reliability
 
-- **AI retry logic:** `_call_main()` in `bot/providers.py` retries up to 3 times with exponential backoff (1s, 2s) before raising. Handles transient network errors and rate limit spikes. HF is not retried (it's too slow — a retry would blow the 60s function cap)
-- **Redis is fully optional (stateless mode):** `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` are not required. When either is missing, `bot/clients.py` sets `redis = None` and prints a one-line startup notice. Each consumer (`history`, `rate_limit`, `preferences`, `search`) checks for `None` at the top of every function and returns safe defaults: history is empty, rate limiting is skipped, `get_provider` returns `DEFAULT_PROVIDER`, `set_provider` returns `False`, search-cache reads/writes are no-ops. This is the intended Day-1 teaching mode — kids can run the bot locally with only a Telegram token and an AI API key.
-- **Redis graceful degradation when Redis is configured but down:** all Redis calls in `bot/history.py`, `bot/rate_limit.py`, `bot/preferences.py`, and `bot/search.py` are wrapped in try-except. If Redis is configured but unreachable at runtime: same fallbacks as stateless mode, plus an error log line per failure.
-- **Typing indicator during slow calls:** `keep_typing()` in `bot/helpers.py` spawns a daemon thread that re-sends `send_chat_action(chat_id, "typing")` every 4 seconds (Telegram's typing action expires after ~5s). On context exit the thread is signalled and joined with a 2s timeout so the serverless function shuts down cleanly
+- **Stateless mode** — when Redis / Vector / Blob env vars are unset, the corresponding consumer modules degrade to no-ops and return safe defaults (empty history, no rate limit, etc.). The bot stays alive in memory-only mode. Useful for the original Day-1 template experience and for local smoke-tests.
+- **Graceful degradation when configured-but-down** — every Redis / Vector / Blob call is wrapped in try/except and logs once on failure. The router never raises into the webhook response.
+- **Question pre-gate** — non-question chatter is dropped via regex *before* embedding/LLM cost is incurred. Cheapest possible filter.
+- **Typing indicator** — `bot/helpers.py` keeps the Telegram typing action alive (re-sent every ~4s) for the duration of slow LLM / embedding calls.
+- **Quiz idempotency** — `reveal_now()` short-circuits if `revealed_at` is already set in Redis, so retried QStash callbacks don't double-post.
+- **QStash key rotation** — both `QSTASH_CURRENT_SIGNING_KEY` and `QSTASH_NEXT_SIGNING_KEY` are tried during JWT verify; safe to rotate without downtime.
+- **Admin gate** — `PERMANENT_ADMIN_ID` (numeric) takes precedence over `PERMANENT_ADMIN` (username). Telegram usernames are mutable and can be recycled 30 days after release; numeric IDs are stable.
 
 ---
 
-## How to add a new command
+## How to add a command
 
-Edit `bot/handlers.py` and add a handler before the catch-all `handle_message`:
+Add a function to `bot/ta/commands.py` and register it in the `COMMANDS` dict (see existing entries — each command has a handler + permission level). The router in `bot/ta/admin.py` dispatches to the registry at step 4.
 
-```python
-@bot.message_handler(commands=["mycommand"])
-def cmd_mycommand(message):
-    bot.reply_to(message, "Your response here")
-```
+If the command needs new state, add helpers to `bot/ta/state.py` (always namespaced under `REDIS_PREFIX`).
 
-Also update `/help` in `cmd_help` to list the new command.
+If the command schedules a delayed callback, publish to QStash via `bot/qstash.py` and add a new file under `api/` for the callback handler — verify the JWT before doing any work. Add the new path to `vercel.json::rewrites` and `functions` if it needs a non-default `maxDuration`.
+
+Update `cmd_help` in `bot/ta/commands.py` so the new command shows in `/help`.
 
 ---
 
 ## How to add a new feature module
 
-1. Create `bot/myfeature.py`
-2. Import and call it from `bot/handlers.py`
-3. Add tests in `tests/test_myfeature.py` — mock any Redis or AI calls
+1. Decide if it's TA-domain (`bot/ta/`) or infrastructure (`bot/`). Most new features are TA-domain.
+2. Create the module; import `clients.py` for upstream services rather than instantiating new ones.
+3. If it touches Redis: namespace every key under `REDIS_PREFIX` and wrap every call in try/except for graceful degradation.
+4. Add tests in `tests/` — `conftest.py` already mocks `telebot`, `openai`, `upstash_redis`, `upstash_vector`, `flask`, etc. at `sys.modules` level.
 
-Do not touch `api/index.py` for new features.
+`api/index.py` rarely needs changes — it's a thin webhook adapter.
 
 ---
 
 ## Running tests
 
 ```bash
-make install   # creates .venv and installs dependencies
-make test      # runs pytest -v
+make install   # creates .venv, installs requirements.txt
+make test      # pytest -v
 ```
 
-Or manually:
+Tests use `unittest.mock`. `tests/conftest.py` sets fake env vars and mocks external packages at `sys.modules` level *before* any `bot/` module is imported. Individual tests patch module-level names (e.g. `bot.ta.state.redis`) for fine-grained control.
+
+CI: `.github/workflows/ci.yml` runs pytest on every push + PR.
+
+---
+
+## Local development
+
+`run_local.py` runs the same `bot/` modules via `bot.infinity_polling()` instead of the webhook. It auto-loads `.env` (or the file pointed at by `ENV_FILE`) with a zero-dependency inline loader and calls `bot.remove_webhook()` first so Telegram routes updates to polling.
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pytest tests/ -v
+make run                       # uses .env
+make run-prod                  # uses .env.prod
+make run-test                  # uses .env.test
+make run ENV_FILE=.env.custom  # any other file
 ```
 
-Tests use `unittest.mock` to patch external dependencies. `tests/conftest.py` sets fake env vars and mocks `telebot`, `openai`, `upstash_redis`, and `flask` at the `sys.modules` level before any bot module is imported. Individual tests then patch specific module-level names (e.g. `bot.history.redis`) to control return values.
-
-Tests run automatically via GitHub Actions on every push and PR (`.github/workflows/ci.yml`).
+After stopping local polling, **re-register the production webhook** (`make push` answering `n` to the env-var prompt is enough — it always re-registers the webhook).
 
 ---
 
 ## Deployment
 
-**Manual:**
+Single-env workflow uses `.env`; dual-env workflow uses `.env.prod` + `.env.test` and the `-prod` / `-test` Make targets.
+
 ```bash
-vercel --prod
+make deploy                # vercel --prod, picks Vercel project from .env
+make deploy-prod           # ENV_FILE=.env.prod
+make deploy-test           # ENV_FILE=.env.test
 ```
 
-**Automatic (recommended):** Connect the GitHub repo to Vercel via the Vercel dashboard (Settings → Git). Every push to `main` triggers a deploy after GitHub Actions tests pass.
+`make deploy` requires `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` in the env file — they pin the deploy to the right Vercel project so a single repo can deploy to multiple projects without swapping `.vercel/`. On success it warms `<PROD_URL>/api/health` to trigger `bot/deploy_notice.py`, which DMs the admin a short-SHA + commit changelog.
 
-**Setting env vars:**
+### `make push` — env sync + webhook registration
+
 ```bash
-vercel env add VARIABLE_NAME --value "value" --force --yes
-vercel --prod  # redeploy to apply
+make push                  # uses .env
+make push-prod             # uses .env.prod
+make push-test             # uses .env.test
 ```
 
-**Always use `--value` flag** when setting env vars non-interactively. Piping values (e.g. `echo "..." | vercel env add`) adds a trailing newline which breaks URL parsing.
+Two phases (independent):
 
-**`make push` — two-phase Vercel sync:** a single command that handles both env var pushing and webhook registration.
+1. **Env push** — prompts `Push env vars from <file> to Vercel project <id>? [y/N]`. On `y`, reads every `KEY=VALUE` and upserts each into Vercel production via `vercel env add <KEY> production --force --yes --value "<VALUE>" </dev/null`. The `</dev/null` is critical — without it `vercel env add` consumes stdin from the `while read` loop and only the first variable gets pushed. Skips comments, blanks, empty values, and `PROD_URL` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID`. On `n`, skips this phase entirely.
+2. **Webhook registration** — runs regardless. Calls Telegram `setWebhook` via `POST` + `--data-urlencode` (safe against special chars), pointing at `<PROD_URL>/api/webhook` with `WEBHOOK_SECRET` and `allowed_updates=["message","edited_message","my_chat_member"]`.
 
-**Preflight:** `make push` requires `PROD_URL` to be set (and non-empty) in `.env`. It checks this with a grep before doing anything else and refuses to run otherwise — there is no safe default and a default would risk pushing env vars to the wrong production bot. This is enforced by a pre-scan before the `[y/N]` prompt so you never get a half-completed push with a missing webhook registration.
+Preflight checks: env file exists, `vercel` and `curl` are installed, and `PROD_URL` / `VERCEL_PROJECT_ID` / `VERCEL_ORG_ID` are non-empty in the env file. Refuses to run otherwise — there is no safe default, and a default would risk pushing to the wrong production bot.
 
-1. **Env var push** (`y`/`n`) — prompts `Update Vercel env vars from .env? [y/N]`. On `y`, reads every `KEY=VALUE` from `.env` and upserts each into Vercel production via `vercel env add <KEY> production --force --yes --value "<VALUE>" </dev/null`. The `</dev/null` on the vercel call is critical — without it, `vercel env add` inherits stdin from the `while read` loop and silently consumes remaining `.env` lines, causing only the first variable to push. Pure upsert: never deletes Vercel vars. Skips comments, blank lines, empty values, and `PROD_URL`. Strips surrounding quotes to match `run_local.py`'s loader. On `n`, skips this phase entirely (zero vercel CLI calls).
-2. **Webhook registration** — runs regardless of the env-push answer. Calls Telegram's `setWebhook` via `POST` + `--data-urlencode` (safe against special chars in tokens/secrets), pointing `<PROD_URL>/api/webhook` at the bot and including `WEBHOOK_SECRET` if present in `.env`. Parses the Telegram response for `"ok":true`. This design lets you re-run `make push`, answer `N` to the env prompt, and just refresh the webhook — useful if the webhook was wiped by a prior `run_local.py` session.
-
-`PROD_URL` is local-only: never written to Vercel (the `VERCEL_` prefix is reserved, so we use `PROD_URL` instead). Run `make deploy` after a `y`-answered push to redeploy with the new env vars.
-
-**Registering the Telegram webhook** (run once after deploy or URL change):
-```bash
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<VERCEL_URL>/api/webhook"
-```
-
-**Production URL:** `https://vercel-telegram-bot-theta.vercel.app`
+After a `y`-answered push, run `make deploy` (or `deploy-prod` / `deploy-test`) to redeploy with the new env vars.
 
 ---
 
 ## Known gotchas
 
-- **`threaded=False` is required** — see "How the bot works" above
-- **Vercel entrypoint filenames** — Vercel only detects Flask apps in specific filenames (`index.py`, `app.py`, `main.py`, etc.). `webhook.py` is not recognised. `api/index.py` is used here
-- **`vercel.json` rewrite** — Vercel's file-based routing sends `/api/webhook` requests to a function named `webhook`, not `index`. The rewrite in `vercel.json` maps `/api/webhook` → `/api/index` so Flask receives the request
-- **Env var newlines** — always use `--value` flag with Vercel CLI, never pipe values
-- **Cerebras model names** — use `llama3.1-8b` not `llama-3.1-8b`. The dot format is required
-- **Telegram 4096 char limit** — `send_reply()` in `bot/helpers.py` handles splitting automatically
-- **Group chats** — `should_respond()` returns `True` for all messages, so the bot replies to every message in any chat it's in. If you need mention-gated or reply-gated behavior in groups, reintroduce it in `bot/helpers.py::should_respond`. The handler still strips `@<bot_username>` from text before sending to the AI
-- **Webhook secret must match** — if `WEBHOOK_SECRET` is set, the same value must be passed as `secret_token` in `setWebhook`. Mismatch causes all updates to return 403 and the bot goes silent
-- **`vercel.json` functions config** — `api/index.py` is pinned to `@vercel/python@4.3.0` with `maxDuration: 60`. HF cold starts eat most of that budget; don't drop the cap without raising HF knobs concerns
+- **`threaded=False`** — required on `telebot.TeleBot`. Threads die when the serverless function returns.
+- **Vercel entrypoint filenames** — only specific names are auto-detected as Flask apps; `index.py` is one. The `vercel.json` rewrite from `/api/webhook` → `/api/index` exists because Vercel's path-based routing would otherwise look for a function literally named `webhook`.
+- **Per-function `maxDuration`** — `api/index.py` and `api/git_sync_batch.py` and `api/github.py` are pinned to 60s; `api/autoreveal.py` to 30s. All on `@vercel/python@4.3.0`.
+- **Env var newlines** — always use `--value` with `vercel env add`. Piping (`echo "..." | vercel env add`) appends a trailing newline that breaks URL parsing.
+- **OpenAI model IDs** — `VALID_MODELS` is intentionally tight (`gpt-5.4-nano`, `gpt-5.4-mini`, `gpt-5.5`). Add to that list before pointing `AI_MODEL` at a new model — invalid IDs just 404 at request time.
+- **Telegram 4096-char limit** — `bot/helpers.py` splits replies at `TG_CHUNK_LEN=4000` automatically.
+- **Webhook secret must match** — if `WEBHOOK_SECRET` is set, the same value must go into `setWebhook`'s `secret_token`. Mismatch → 403 on every update → bot goes silent.
+- **QStash callbacks must verify JWT** — every `api/<callback>.py` should start by calling `bot.qstash.verify_jwt()`. Skipping verification means anyone with the URL can fire callbacks.
+- **GitHub webhook secret** — `api/github.py` rejects unsigned requests. The same `GITHUB_WEBHOOK_SECRET` must be configured on every GitHub repo's webhook.
+- **`PERMANENT_ADMIN_ID` over `PERMANENT_ADMIN`** — username gates are unsafe on Telegram (usernames are mutable + recycled after 30 days). Always set the numeric ID.
+- **`REDIS_PREFIX` / `VECTOR_NAMESPACE` / `BLOB_PATH_PREFIX`** — these MUST differ between prod and test if both share upstream services. Easy to forget; everything appears to work until one bot reads the other's data.
+- **Multi-bot env isolation** — `BOT_ENV` is purely cosmetic (shows in `/info` + logs). The actual isolation is the three prefixes above.
+- **`run_local.py` removes the webhook** — after a local-polling session, run `make push` (or any `setWebhook` call) to restore it, otherwise the production bot stays silent.
+- **HF provider is legacy** — `bot/providers.py` no longer exists; `HF_SPACE_ID` is preserved as an env-var stub but the code path is effectively dormant. Don't ground new features on it.
