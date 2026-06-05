@@ -5,6 +5,7 @@ site doesn't repeat a try/except. Telegram loves to 400 on harmless
 things (delete_message for a message older than 48h, etc.) — we swallow
 those and log.
 """
+
 from __future__ import annotations
 
 from bot.clients import bot
@@ -27,6 +28,7 @@ def set_reaction(chat_id: int | str, message_id: int, emoji: str) -> bool:
     """
     try:
         from telebot import types
+
         reaction = [types.ReactionTypeEmoji(emoji=emoji)]
         bot.set_message_reaction(chat_id, message_id, reaction)
         return True
@@ -42,3 +44,14 @@ def send_message(chat_id: int | str, text: str, **kwargs) -> int | None:
     except Exception as e:
         print(f"[ta.tg] send_message error chat={chat_id}: {e}")
         return None
+
+
+def edit_message(chat_id: int | str, message_id: int, text: str, **kwargs) -> bool:
+    try:
+        bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text, **kwargs
+        )
+        return True
+    except Exception as e:
+        print(f"[ta.tg] edit_message error chat={chat_id} msg={message_id}: {e}")
+        return False

@@ -260,16 +260,14 @@ _STUDENT_GROUP_WAIT_SECONDS = 3
 
 
 def _answer_question(p: Prepared) -> None:
-    """Run the RAG + LLM pipeline and send the reply.
+    """Run the RAG + LLM pipeline and stream the reply.
 
-    Typing indicator only fires when we're confident a reply is coming —
-    DMs, @mentions, and replies-to-bot. For plain group chatter the LLM
-    will most likely return IGNORE, so a typing bubble that appears and
-    disappears looks broken; better to stay silent and let the rare
-    legitimate answer just pop in.
+    Streaming replaces the typing indicator — the answer appears live as
+    tokens arrive. For non-addressed group chatter the 3-second wait still
+    applies so a human can reply first.
     """
-    from bot.ai import answer
-    from bot.helpers import keep_typing, send_reply
+    from bot.ai import stream_answer
+    from bot.helpers import stream_reply as helpers_stream_reply
 
     addressed = p.is_dm or p.is_mention or p.is_reply_to_bot
 
@@ -281,13 +279,12 @@ def _answer_question(p: Prepared) -> None:
         time.sleep(_STUDENT_GROUP_WAIT_SECONDS)
 
     try:
-        if addressed:
-            with keep_typing(p.chat_id):
-                reply = answer(p)
-        else:
-            reply = answer(p)
-        if reply:
-            send_reply(p.message, reply)
+        final = helpers_stream_reply(
+            p.message,
+            lambda on_chunk: stream_answer(p, on_chunk),
+        )
+        if not final and addressed:
+            send_message(p.chat_id, "Something went wrong. Please try again.")
     except Exception as e:
         print(f"[ta.admin] _answer_question error: {e}")
         traceback.print_exc()

@@ -1,6 +1,7 @@
 import html
 import io
 import re
+import time
 import threading
 from contextlib import contextmanager
 from bot.clients import bot
@@ -204,3 +205,105 @@ def keep_typing(chat_id: int):
 def should_respond(message) -> bool:
     """Respond to all messages in private chats and group chats."""
     return True
+
+
+def stream_reply(message, on_chunk_factory) -> str | None:
+    """Set up streaming Telegram reply, then invoke ``on_chunk_factory``.
+
+    ``on_chunk_factory`` is a callable that receives the ``on_chunk(partial_html)``
+    callback and returns the final text (or None if suppressed). The factory
+    is called immediately; inside it, invoking ``on_chunk`` sends/edits the
+    Telegram message.
+
+    When ``on_chunk(None)`` is called (guardrail suppression), the temporary
+    message is deleted if one was sent and the post-stream path is skipped.
+
+    Returns the final text, or None if suppressed or nothing was sent.
+    """
+    from bot.ta.tg import delete_message as tg_delete_message
+    from bot.ta.tg import edit_message as tg_edit_message
+
+    chat_id = message.chat.id
+    is_group = getattr(message.chat, "type", "private") != "private"
+    message_id = None
+    last_edit = 0.0
+    final_text = None
+    full_text = None  # untruncated text for overflow chunks
+    send_error = False
+    suppressed = False
+
+    # Kwargs for the initial send — reply_to_message_id only applies here.
+    send_kwargs = {
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if is_group:
+        send_kwargs["reply_to_message_id"] = message.message_id
+
+    # Kwargs for subsequent edits — no reply_to_message_id (not valid for
+    # editMessageText), but same parse_mode and preview settings.
+    edit_kwargs = {
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    def on_chunk(partial) -> bool:
+        nonlocal message_id, last_edit, final_text, full_text, send_error, suppressed
+        # None signal — guardrail suppressed the reply; delete temp message.
+        if partial is None:
+            suppressed = True
+            if message_id:
+                tg_delete_message(chat_id, message_id)
+            message_id = None
+            final_text = None
+            full_text = None
+            return False
+        if not partial:
+            return True
+        # Track the full text for overflow handling after the factory returns.
+        full_text = partial
+        safe = _split_for_telegram(partial, MAX_MSG_LEN)[0]
+        if message_id is None:
+            try:
+                sent = bot.send_message(chat_id, safe, **send_kwargs)
+                message_id = getattr(sent, "message_id", None)
+                send_error = False  # clear on successful send
+            except Exception as e:
+                print(f"[helpers] stream_reply send_message error: {e}")
+                send_error = True
+                return False
+        else:
+            now = time.monotonic()
+            if now - last_edit >= 0.2:
+                tg_edit_message(chat_id, message_id, safe, **edit_kwargs)
+                last_edit = now
+        final_text = safe
+        return True
+
+    result = on_chunk_factory(on_chunk)
+
+    # Suppressed — skip final edit, overflow, voice, and return None.
+    if suppressed:
+        return None
+
+    # If the initial send failed, bail — don't return success.
+    if send_error:
+        return None
+
+    # Final edit — always force it, regardless of throttle timing.
+    if message_id and final_text:
+        tg_edit_message(chat_id, message_id, final_text, **edit_kwargs)
+
+        # If the answer is longer than one Telegram chunk, send follow-ups
+        # (same behavior as the old send_reply / _send_text_chunks).
+        if full_text:
+            chunks = _split_for_telegram(full_text, MAX_MSG_LEN)
+            for extra in chunks[1:]:
+                bot.send_message(chat_id, extra, **edit_kwargs)
+
+    # Voice reply: if the originating message was a voice question, synthesize
+    # and send voice alongside the text (matches old send_reply behavior).
+    if getattr(message, "_reply_as_voice", False) is True and final_text:
+        _send_voice_reply(message, final_text)
+
+    return result if result is not None else final_text
