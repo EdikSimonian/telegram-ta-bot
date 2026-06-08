@@ -155,25 +155,16 @@ def _dm_fallback_reply(question: str, p: Prepared) -> str:
     return "I'm here. Send me a course question or a follow-up from the group."
 
 
-def answer(p: Prepared) -> str | None:
-    """Produce a reply for the prepared message, or None if we shouldn't reply.
+def _assemble_messages(
+    p: Prepared,
+    raw: str,
+    system_msg: str,
+    extra_system: str | None,
+) -> tuple[list[dict], str]:
+    """Assemble the messages list for an LLM call.
 
-    Side effects: persists user+assistant to group history on success.
+    Returns (messages, user_payload).
     """
-    raw = (p.stripped_text or "").strip()
-    if not raw:
-        return None
-
-    # 1. RAG retrieval. Filter empty-chunk hits up front so source numbers
-    #    in the prompt line up 1:1 with matches[idx-1] in the citation step.
-    matches = [m for m in rag.retrieve(raw) if (m.get("chunkText") or "").strip()]
-    context_block = _format_numbered_context(matches) if matches else None
-
-    # 2. Assemble messages. System first, then prior turns (group-keyed),
-    #    then the new user turn (with the spec §5.9 prefix).
-    system_msg = _build_system(context_block)
-    extra_system = _maybe_search_block(raw, has_rag_hits=bool(matches))
-
     messages: list[dict] = [{"role": "system", "content": system_msg}]
     if extra_system:
         messages.append({"role": "system", "content": extra_system})
@@ -219,65 +210,16 @@ def answer(p: Prepared) -> str | None:
     user_payload = f"{prefix} {raw}".strip() if prefix else raw
     messages.append({"role": "user", "content": user_payload})
 
-    # 3. Call OpenAI.
-    model = get_active_model(p.group_key) or DEFAULT_MODEL
-    try:
-        resp = ai.chat.completions.create(model=model, messages=messages)
-        raw_reply = (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        print(f"[ai] chat error: {e}")
-        return None
+    return messages, user_payload
 
-    # 3b. Pull off the SOURCES_USED trailer before guardrail so it can't
-    #     interfere with IGNORE detection or hedging checks.
-    raw_reply, used_sources = _extract_sources_used(raw_reply)
 
-    # 3c. Guardrail: strip <think> blocks, leading reasoning, drop hedged /
-    #     IGNORE / empty replies. Suppressed replies don't persist to history
-    #     (we don't want "IGNORE" polluting the context).
-    reply = guardrail.clean(raw_reply)
-    if not reply:
-        if not p.is_dm:
-            return None
-        reply = _dm_fallback_reply(raw, p)
-
-    # 4. Persist — group-level history so the whole class shares context.
-    append_history(p.group_key, "user", user_payload, limit=MAX_HISTORY)
-    append_history(p.group_key, "assistant", reply, limit=MAX_HISTORY)
-
-    # 4a. DM audit log: a per-user transcript so instructors can /dm view
-    #     a specific student later. Raw user text (no prefix) is friendlier
-    #     to read than user_payload.
-    if p.is_dm:
-        append_dm_log(
-            p.user_id,
-            "user",
-            raw,
-            username=p.username,
-            first_name=p.first_name,
-        )
-        append_dm_log(
-            p.user_id,
-            "assistant",
-            reply,
-            username=p.username,
-            first_name=p.first_name,
-        )
-
-    # 4b. In groups: snapshot this Q&A per student so DM follow-ups work.
-    if not p.is_dm:
-        save_last_group_qa(p.user_id, raw, reply, p.group_key)
-
-    # 5. Build the outbound HTML message. History above is stored as plain
-    #    text (the model's raw output); only the rendered reply is escaped
-    #    and decorated. send_reply uses parse_mode="HTML" so any unescaped
-    #    `<` / `&` from the model would 400 the message — escape now.
+def _format_outbound(
+    reply: str, matches: list[dict], used_sources: set[int] | None, is_dm: bool
+) -> str:
+    """Build the outbound HTML message from a cleaned reply text."""
     outbound = html.escape(reply)
 
-    # 5a. Append source citations — only for sources the model signalled it
-    #     actually used (via the SOURCES_USED trailer). If the trailer is
-    #     missing (legacy model) or empty, we stay silent rather than cite
-    #     everything the retriever returned.
+    # Append source citations
     if matches and used_sources:
         seen_urls: set[str] = set()
         sources: list[str] = []
@@ -300,8 +242,165 @@ def answer(p: Prepared) -> str | None:
         if sources:
             outbound = f"{outbound}\n\n<b>Sources:</b>\n" + "\n".join(sources[:5])
 
-    # 6. In groups: nudge students to DM for follow-up.
-    if not p.is_dm:
+    # In groups: nudge students to DM for follow-up.
+    if not is_dm:
         outbound += "\n\n<i>DM me if you'd like to ask follow-up questions.</i>"
+
+    return outbound
+
+
+def _persist_history(p: Prepared, user_payload: str, reply: str) -> None:
+    """Persist user + assistant turns to history and DM log."""
+    append_history(p.group_key, "user", user_payload, limit=MAX_HISTORY)
+    append_history(p.group_key, "assistant", reply, limit=MAX_HISTORY)
+
+    if p.is_dm:
+        append_dm_log(
+            p.user_id,
+            "user",
+            (p.stripped_text or "").strip(),
+            username=p.username,
+            first_name=p.first_name,
+        )
+        append_dm_log(
+            p.user_id,
+            "assistant",
+            reply,
+            username=p.username,
+            first_name=p.first_name,
+        )
+
+    if not p.is_dm:
+        save_last_group_qa(
+            p.user_id, (p.stripped_text or "").strip(), reply, p.group_key
+        )
+
+
+def stream_answer(p: Prepared, on_chunk):
+    """Stream a reply, calling ``on_chunk(partial_html)`` as tokens arrive.
+
+    ``on_chunk`` receives HTML-escaped partial text. During the stream the
+    partial is the raw model output (``on_chunk`` is responsible for
+    displaying it temporarily). After the stream completes, guardrail and
+    source extraction run on the full text. If the reply is suppressed
+    (IGNORE in a non-DM), ``on_chunk`` is called with ``None`` to signal
+    the caller to delete the temporary message. Otherwise the final call
+    is the complete formatted reply with sources and footer.
+
+    Returns the final outbound HTML string, or None if suppressed. History
+    is persisted only when the reply is not suppressed — same as ``answer()``.
+    """
+    raw = (p.stripped_text or "").strip()
+    if not raw:
+        return None
+
+    # 1. RAG retrieval
+    matches = [m for m in rag.retrieve(raw) if (m.get("chunkText") or "").strip()]
+    context_block = _format_numbered_context(matches) if matches else None
+
+    # 2. Assemble messages
+    system_msg = _build_system(context_block)
+    extra_system = _maybe_search_block(raw, has_rag_hits=bool(matches))
+    messages, user_payload = _assemble_messages(p, raw, system_msg, extra_system)
+
+    # 3. Call OpenAI with streaming
+    model = get_active_model(p.group_key) or DEFAULT_MODEL
+    try:
+        response = ai.chat.completions.create(
+            model=model, messages=messages, stream=True
+        )
+        accumulated = []
+        for chunk in response:
+            delta = (
+                chunk.choices[0].delta.content
+                if chunk.choices and chunk.choices[0].delta
+                else None
+            )
+            if delta:
+                accumulated.append(delta)
+                partial = "".join(accumulated)
+                on_chunk(html.escape(partial))
+        raw_reply = "".join(accumulated).strip()
+    except Exception as e:
+        print(f"[ai] stream chat error: {e}")
+        on_chunk(None)  # signal caller to clean up
+        return None
+
+    if not raw_reply:
+        on_chunk(None)
+        return None
+
+    # 3b. Pull off the SOURCES_USED trailer before guardrail
+    raw_reply, used_sources = _extract_sources_used(raw_reply)
+
+    # 3c. Guardrail
+    reply = guardrail.clean(raw_reply)
+    if not reply:
+        if not p.is_dm:
+            on_chunk(None)  # suppressed — delete temp message
+            return None
+        reply = _dm_fallback_reply(raw, p)
+
+    # 4. Build final outbound with sources + footer and emit as last chunk.
+    #    on_chunk delivers the final text synchronously; only persist after
+    #    delivery so a Telegram send failure doesn't pollute history.
+    outbound = _format_outbound(reply, matches, used_sources, p.is_dm)
+    delivered = on_chunk(outbound)
+    if not delivered:
+        return None
+
+    # 5. Persist — group-level history so the whole class shares context.
+    _persist_history(p, user_payload, reply)
+
+    return outbound
+
+
+def answer(p: Prepared) -> str | None:
+    """Produce a reply for the prepared message, or None if we shouldn't reply.
+
+    Side effects: persists user+assistant to group history on success.
+    """
+    raw = (p.stripped_text or "").strip()
+    if not raw:
+        return None
+
+    # 1. RAG retrieval. Filter empty-chunk hits up front so source numbers
+    #    in the prompt line up 1:1 with matches[idx-1] in the citation step.
+    matches = [m for m in rag.retrieve(raw) if (m.get("chunkText") or "").strip()]
+    context_block = _format_numbered_context(matches) if matches else None
+
+    # 2. Assemble messages. System first, then prior turns (group-keyed),
+    #    then the new user turn (with the spec §5.9 prefix).
+    system_msg = _build_system(context_block)
+    extra_system = _maybe_search_block(raw, has_rag_hits=bool(matches))
+    messages, user_payload = _assemble_messages(p, raw, system_msg, extra_system)
+
+    # 3. Call OpenAI.
+    model = get_active_model(p.group_key) or DEFAULT_MODEL
+    try:
+        resp = ai.chat.completions.create(model=model, messages=messages)
+        raw_reply = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[ai] chat error: {e}")
+        return None
+
+    # 3b. Pull off the SOURCES_USED trailer before guardrail so it can't
+    #     interfere with IGNORE detection or hedging checks.
+    raw_reply, used_sources = _extract_sources_used(raw_reply)
+
+    # 3c. Guardrail: strip <think> blocks, leading reasoning, drop hedged /
+    #     IGNORE / empty replies. Suppressed replies don't persist to history
+    #     (we don't want "IGNORE" polluting the context).
+    reply = guardrail.clean(raw_reply)
+    if not reply:
+        if not p.is_dm:
+            return None
+        reply = _dm_fallback_reply(raw, p)
+
+    # 4. Persist
+    _persist_history(p, user_payload, reply)
+
+    # 5. Build outbound HTML
+    outbound = _format_outbound(reply, matches, used_sources, p.is_dm)
 
     return outbound

@@ -72,6 +72,22 @@ def _split_for_telegram(text: str, limit: int) -> list[str]:
     return chunks
 
 
+def _final_chunks(text: str, limit: int) -> list[str]:
+    """Split a finished reply, adding part markers when it overflows.
+
+    A reply that fits in one Telegram message is returned untouched.
+    Otherwise each chunk is prefixed with ``(1/2) ``-style continuation
+    markers (Hermes-style indicators) so a split answer reads as one
+    answer instead of two separate replies. ``limit`` must already
+    reserve room for the ~8-char marker (stream_reply's safe_limit does).
+    """
+    chunks = _split_for_telegram(text, limit)
+    if len(chunks) == 1:
+        return chunks
+    n = len(chunks)
+    return [f"({i}/{n}) {c}" for i, c in enumerate(chunks, 1)]
+
+
 def _strip_for_speech(text: str) -> str:
     """Render an HTML reply down to plain prose for TTS.
 
@@ -215,6 +231,18 @@ def stream_reply(message, on_chunk_factory) -> str | None:
     is called immediately; inside it, invoking ``on_chunk`` sends/edits the
     Telegram message.
 
+    Two transports (mirroring Hermes' stream consumer):
+
+    - **DMs** — Telegram's native draft streaming (``sendMessageDraft``,
+      Bot API 9.5+, private chats only). Reusing the same ``draft_id``
+      across frames makes the client render an animated in-progress
+      bubble (the animated "…"). Drafts have no message_id; the final
+      text goes out as a regular sendMessage, which replaces the draft
+      bubble in the chat. Any draft failure permanently falls back to
+      the edit-based transport for the rest of the response.
+    - **Groups** — progressive editMessageText with a trailing cursor
+      (drafts aren't available outside private chats).
+
     When ``on_chunk(None)`` is called (guardrail suppression), the temporary
     message is deleted if one was sent and the post-stream path is skipped.
 
@@ -227,10 +255,23 @@ def stream_reply(message, on_chunk_factory) -> str | None:
     is_group = getattr(message.chat, "type", "private") != "private"
     message_id = None
     last_edit = 0.0
+    last_sent = None  # text of the last send/edit actually delivered
     final_text = None
     full_text = None  # untruncated text for overflow chunks
     send_error = False
     suppressed = False
+
+    # Native draft streaming — DMs only, and only when the installed
+    # telebot exposes sendMessageDraft (4.32+). draft_id must be a non-zero
+    # int, stable for a whole text segment so the client animates frame
+    # transitions — and BUMPED per segment (draft_seq) so part 2 starts as
+    # a fresh draft animation instead of morphing out of part 1's text
+    # (Hermes bumps its draft id on segment breaks for the same reason).
+    # Deriving the base from the originating message_id keeps concurrent
+    # serverless invocations in the same chat from colliding.
+    draft_active = (not is_group) and callable(getattr(bot, "send_message_draft", None))
+    draft_id = (getattr(message, "message_id", None) or 1) * 1000
+    draft_seq = 0
 
     # Kwargs for the initial send — reply_to_message_id only applies here.
     send_kwargs = {
@@ -247,13 +288,42 @@ def stream_reply(message, on_chunk_factory) -> str | None:
         "disable_web_page_preview": True,
     }
 
+    # Min seconds between streaming edits. Each editMessageText is a blocking
+    # HTTPS round-trip (~200-400ms) and Telegram allows roughly 1 edit/sec
+    # per chat — a tighter interval mostly burns webhook wall-time inside
+    # Telegram API calls (risking Telegram's read timeout + redelivery) and
+    # trips flood control.
+    edit_interval = 1.0
+
+    # Streaming cursor appended to every in-progress partial (Hermes-style:
+    # its stream consumer appends DEFAULT_STREAMING_CURSOR to each draft
+    # edit). Riding the end of the growing message, it reads as a typing
+    # animation and signals more is coming. The final edit drops it.
+    stream_cursor = " …"
+    # Leave room for the cursor AND the "(99/99) " part marker so neither
+    # decoration can push a chunk past Telegram's hard limit. One shared
+    # limit also keeps stream-time flush boundaries aligned with the
+    # finalize split, so marker reconciliation is a pure prefix edit.
+    safe_limit = max(16, MAX_MSG_LEN - len(stream_cursor) - 8)
+
+    # Real messages already posted mid-stream for completed head chunks
+    # (draft transport only) — reconciled with part markers at finalize.
+    flushed_ids: list = []
+
     def on_chunk(partial) -> bool:
-        nonlocal message_id, last_edit, final_text, full_text, send_error, suppressed
+        nonlocal message_id, last_edit, last_sent, final_text, full_text
+        nonlocal send_error, suppressed, draft_active, draft_seq
         # None signal — guardrail suppressed the reply; delete temp message.
+        # (Draft mode has no temp message; the draft bubble clears client-
+        # side once any real message — or nothing — follows.)
         if partial is None:
             suppressed = True
             if message_id:
                 tg_delete_message(chat_id, message_id)
+            for mid in flushed_ids:
+                if mid:
+                    tg_delete_message(chat_id, mid)
+            flushed_ids.clear()
             message_id = None
             final_text = None
             full_text = None
@@ -262,11 +332,74 @@ def stream_reply(message, on_chunk_factory) -> str | None:
             return True
         # Track the full text for overflow handling after the factory returns.
         full_text = partial
-        safe = _split_for_telegram(partial, MAX_MSG_LEN)[0]
+        parts = _split_for_telegram(partial, safe_limit)
+        safe = parts[0]
+
+        # Native draft transport (DMs): frames animate client-side, no
+        # cursor needed. First failure permanently drops to edit-based —
+        # message_id is still None there, so the next chunk simply takes
+        # the initial-send branch below, same as a group response.
+        if draft_active:
+            # Completed head chunks are final — the split boundary only
+            # moves forward — so post them as real messages NOW and keep
+            # streaming only the tail in the draft bubble. Without this,
+            # part 2's content animates in the bubble before part 1
+            # exists in the chat. Part markers are reconciled at finalize
+            # via edit, once the total count is known.
+            while len(parts) - 1 > len(flushed_ids):
+                head = parts[len(flushed_ids)]
+                # Let the bubble finish part N before it's posted: one
+                # forced frame with the complete head text (best-effort,
+                # cosmetic), then the real message.
+                try:
+                    bot.send_message_draft(
+                        chat_id, draft_id + draft_seq, head, parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+                try:
+                    sent = bot.send_message(chat_id, head, **send_kwargs)
+                    flushed_ids.append(getattr(sent, "message_id", None))
+                except Exception as e:
+                    print(f"[helpers] stream_reply flush send error: {e}")
+                    break  # retry on the next chunk
+                # New segment → new draft_id: part N+1 must animate as a
+                # fresh bubble, not as a morph of part N's text (which
+                # reads as both parts streaming at once). Reset throttle
+                # state so the new segment's first frame goes out now.
+                draft_seq += 1
+                last_sent = None
+                last_edit = 0.0
+
+            # Frame the tail chunk — the only part still growing.
+            frame = parts[-1]
+            now = time.monotonic()
+            if now - last_edit >= edit_interval and frame != last_sent:
+                try:
+                    ok = bot.send_message_draft(
+                        chat_id, draft_id + draft_seq, frame, parse_mode="HTML"
+                    )
+                except Exception as e:
+                    print(f"[helpers] stream_reply send_message_draft error: {e}")
+                    ok = False
+                if ok:
+                    last_edit = now
+                    last_sent = frame
+                else:
+                    draft_active = False
+                    last_sent = None
+            final_text = safe
+            return True
+
+        # Edit-based transport (groups, or DM draft fallback). In-progress
+        # partials carry the streaming cursor; the forced final edit below
+        # sends final_text without it.
+        display = safe + stream_cursor
         if message_id is None:
             try:
-                sent = bot.send_message(chat_id, safe, **send_kwargs)
+                sent = bot.send_message(chat_id, display, **send_kwargs)
                 message_id = getattr(sent, "message_id", None)
+                last_sent = display
                 send_error = False  # clear on successful send
             except Exception as e:
                 print(f"[helpers] stream_reply send_message error: {e}")
@@ -274,9 +407,10 @@ def stream_reply(message, on_chunk_factory) -> str | None:
                 return False
         else:
             now = time.monotonic()
-            if now - last_edit >= 0.2:
-                tg_edit_message(chat_id, message_id, safe, **edit_kwargs)
+            if now - last_edit >= edit_interval and display != last_sent:
+                tg_edit_message(chat_id, message_id, display, **edit_kwargs)
                 last_edit = now
+                last_sent = display
         final_text = safe
         return True
 
@@ -290,15 +424,45 @@ def stream_reply(message, on_chunk_factory) -> str | None:
     if send_error:
         return None
 
-    # Final edit — always force it, regardless of throttle timing.
+    # Final delivery. _final_chunks adds "(1/2)"-style part markers when
+    # the answer overflows one message, so a split reply reads as one
+    # answer instead of two separate replies.
     if message_id and final_text:
-        tg_edit_message(chat_id, message_id, final_text, **edit_kwargs)
-
-        # If the answer is longer than one Telegram chunk, send follow-ups
-        # (same behavior as the old send_reply / _send_text_chunks).
-        if full_text:
-            chunks = _split_for_telegram(full_text, MAX_MSG_LEN)
-            for extra in chunks[1:]:
+        # Edit-based transport: force the final edit past the throttle,
+        # but skip the no-op case where the last streamed edit already
+        # delivered the final text.
+        chunks = _final_chunks(full_text or final_text, safe_limit)
+        if chunks[0] != last_sent:
+            tg_edit_message(chat_id, message_id, chunks[0], **edit_kwargs)
+        for extra in chunks[1:]:
+            bot.send_message(chat_id, extra, **edit_kwargs)
+    elif final_text:
+        # Draft transport: head chunks may already exist as flushed real
+        # messages; the tail only ever lived in the draft bubble. Send the
+        # remaining chunks for real (the client swaps the animated draft
+        # bubble for them — drafts have no message_id and can't be
+        # "promoted", per the Bot API), then reconcile the flushed heads:
+        # edit in their part markers and any content shift the guardrail /
+        # sources step introduced relative to the raw streamed text.
+        chunks = _final_chunks(full_text or final_text, safe_limit)
+        for i, mid in enumerate(flushed_ids):
+            if not mid:
+                continue
+            if i < len(chunks):
+                tg_edit_message(chat_id, mid, chunks[i], **edit_kwargs)
+            else:
+                # Final text shrank below what was flushed (guardrail
+                # trimmed it) — drop the orphaned message.
+                tg_delete_message(chat_id, mid)
+        remaining = chunks[len(flushed_ids) :]
+        if remaining:
+            try:
+                sent = bot.send_message(chat_id, remaining[0], **send_kwargs)
+                message_id = getattr(sent, "message_id", None)
+            except Exception as e:
+                print(f"[helpers] stream_reply final send_message error: {e}")
+                return None
+            for extra in remaining[1:]:
                 bot.send_message(chat_id, extra, **edit_kwargs)
 
     # Voice reply: if the originating message was a voice question, synthesize

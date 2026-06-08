@@ -13,6 +13,7 @@ Steps applied in order:
 should be suppressed entirely. Callers should ``if cleaned is None:
 return`` and skip history persistence so we don't pollute the context.
 """
+
 from __future__ import annotations
 
 import re
@@ -28,7 +29,9 @@ _LEADING_REASONING = [
         re.IGNORECASE,
     ),
     re.compile(r"^(the user (is asking|asked|wants|said|mentioned))", re.IGNORECASE),
-    re.compile(r"^(looking at the (history|context|conversation|message))", re.IGNORECASE),
+    re.compile(
+        r"^(looking at the (history|context|conversation|message))", re.IGNORECASE
+    ),
     re.compile(
         r"^(i think|i need to|i should|let me think|"
         r"let me (check|analyze|consider|unpack))",
@@ -50,6 +53,26 @@ HEDGING_PHRASES = (
     "i can't answer that",
     "i cannot answer that",
 )
+
+# Inappropriate content topics for teenage audience
+_INAPPROPRIATE_TOPICS = [
+    "alcohol",
+    "drugs",
+    "sex",
+    "sexual",
+    "porn",
+    "nudity",
+    "illegal",
+    "violence",
+    "hate",
+    "discrimination",
+    "harassment",
+    "suicide",
+    "self-harm",
+    "weapons",
+    "gambling",
+    "adult",
+]
 
 
 # ── Step 1: strip <think> blocks ──────────────────────────────────────────
@@ -81,6 +104,13 @@ def is_hedging(text: str) -> bool:
     return any(phrase in t for phrase in HEDGING_PHRASES)
 
 
+# ── Step 6: inappropriate content check ───────────────────────────────────
+def is_inappropriate_content(text: str) -> bool:
+    """Check if the text contains inappropriate content for teens."""
+    t = (text or "").lower()
+    return any(topic in t for topic in _INAPPROPRIATE_TOPICS)
+
+
 # ── Step 4: ignore marker ─────────────────────────────────────────────────
 def is_ignore_marker(text: str) -> bool:
     return (text or "").strip().upper() == "IGNORE"
@@ -98,5 +128,7 @@ def clean(text: str) -> str | None:
     if is_ignore_marker(step2):
         return None
     if is_hedging(step2):
+        return None
+    if is_inappropriate_content(step2):
         return None
     return step2

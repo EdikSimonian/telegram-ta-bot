@@ -110,6 +110,10 @@ def _k_active_model(group_key: str) -> str:
     return f"{_P}activeModel:{group_key}"
 
 
+def _k_update_seen(update_id: int | str) -> str:
+    return f"{_P}updateSeen:{update_id}"
+
+
 def _safe(op, default=None):
     """Run a Redis op; log and return ``default`` on failure."""
     if redis is None:
@@ -327,6 +331,26 @@ def mark_dm_welcomed(user_id: int | str) -> bool:
     except Exception as e:
         print(f"[ta.state] mark_dm_welcomed error: {e}")
         return False
+
+
+def mark_update_seen(update_id: int | str, ttl: int = 3600) -> bool:
+    """Atomically claim a Telegram update_id. Returns True if we own it.
+
+    Telegram redelivers an update (same update_id) whenever the webhook
+    doesn't ack with a 200 in time — e.g. a long streamed answer blowing
+    past Telegram's read timeout or Vercel's maxDuration. Without this
+    gate every redelivery re-answers the same message, which loops
+    forever. SET NX EX makes processing idempotent: first delivery wins,
+    retries no-op. Fails open (stateless mode / Redis down) — duplicate
+    answers beat silence.
+    """
+    if redis is None:
+        return True
+    try:
+        return bool(redis.set(_k_update_seen(update_id), "1", nx=True, ex=ttl))
+    except Exception as e:
+        print(f"[ta.state] mark_update_seen error: {e}")
+        return True
 
 
 # ── Rate limiter (TA-specific, rolling window) ────────────────────────────

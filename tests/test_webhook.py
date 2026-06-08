@@ -90,6 +90,55 @@ def test_webhook_fails_closed_when_no_secret_in_prod_env():
         assert status == 500
 
 
+def test_webhook_skips_duplicate_update():
+    """Telegram redelivers an update when the previous attempt timed out
+    (e.g. a long streamed answer). The duplicate must be acked with 200
+    WITHOUT re-dispatching — otherwise one slow answer loops forever."""
+    mock_request = MagicMock()
+    mock_request.headers.get.return_value = "correct_secret"
+    mock_request.get_data.return_value = "{}"
+    mock_bot = MagicMock()
+    with (
+        patch("api.index.WEBHOOK_SECRET", "correct_secret"),
+        patch("api.index.request", mock_request),
+        patch("api.index.bot", mock_bot),
+        patch("api.index.telebot") as mock_telebot,
+        patch("api.index.mark_update_seen", return_value=False) as mock_seen,
+    ):
+        update = MagicMock()
+        update.update_id = 12345
+        mock_telebot.types.Update.de_json.return_value = update
+        from api.index import webhook
+
+        result = webhook()
+        assert result == ("OK", 200)
+        mock_seen.assert_called_once_with(12345)
+        mock_bot.process_new_updates.assert_not_called()
+
+
+def test_webhook_processes_first_delivery():
+    """First delivery of an update_id claims the dedup key and dispatches."""
+    mock_request = MagicMock()
+    mock_request.headers.get.return_value = "correct_secret"
+    mock_request.get_data.return_value = "{}"
+    mock_bot = MagicMock()
+    with (
+        patch("api.index.WEBHOOK_SECRET", "correct_secret"),
+        patch("api.index.request", mock_request),
+        patch("api.index.bot", mock_bot),
+        patch("api.index.telebot") as mock_telebot,
+        patch("api.index.mark_update_seen", return_value=True),
+    ):
+        update = MagicMock()
+        update.update_id = 12345
+        mock_telebot.types.Update.de_json.return_value = update
+        from api.index import webhook
+
+        result = webhook()
+        assert result == ("OK", 200)
+        mock_bot.process_new_updates.assert_called_once_with([update])
+
+
 # ── /api/notify-admin ─────────────────────────────────────────────────────
 def _notify_request(header_secret: str, body: dict | None):
     req = MagicMock()

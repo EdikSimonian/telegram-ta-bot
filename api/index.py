@@ -7,7 +7,7 @@ import bot.handlers  # registers all handlers with the bot
 from bot.clients import bot
 from bot.config import BOT_ENV, PERMANENT_ADMIN, WEBHOOK_SECRET
 from bot.deploy_notice import notify_once
-from bot.ta.state import get_user_chat
+from bot.ta.state import get_user_chat, mark_update_seen
 
 app = Flask(__name__)
 
@@ -36,6 +36,13 @@ def webhook():
             return "Forbidden", 403
     notify_once()
     update = telebot.types.Update.de_json(request.get_data(as_text=True))
+    # Idempotency gate: Telegram redelivers an update (same update_id) when
+    # the previous attempt didn't ack in time (long streamed answer, function
+    # timeout). Ack duplicates immediately instead of re-answering — without
+    # this, one slow answer becomes an infinite redelivery loop.
+    if update is not None and getattr(update, "update_id", None) is not None:
+        if not mark_update_seen(update.update_id):
+            return "OK", 200
     try:
         bot.process_new_updates([update])
     except Exception:
