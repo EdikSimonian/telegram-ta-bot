@@ -237,6 +237,45 @@ def test_subsequent_dm_falls_through_to_llm():
         _exit(stack)
 
 
+# ── Rule 1: DM gate when DMs disabled ─────────────────────────────────────
+def test_student_dm_declined_when_dms_disabled():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.DMS_ENABLED", False),
+            patch("bot.ta.admin.send_message") as send,
+            patch("bot.ta.admin._answer_question") as ans,
+        ):
+            from bot.ta.admin import route
+
+            route(_msg(chat_type="private", chat_id=42, text="explain decorators"))
+            send.assert_called_once()
+            assert "turned off" in send.call_args.args[1].lower()
+            ans.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_admin_dm_still_works_when_dms_disabled():
+    stack = _patches(is_admin=True, welcomed_already=True)
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.DMS_ENABLED", False),
+            patch("bot.ta.admin.send_message") as send,
+            patch("bot.ta.admin._answer_question") as ans,
+        ):
+            from bot.ta.admin import route
+
+            route(_msg(chat_type="private", chat_id=42, username="alice", text="hi"))
+            # Admin is never declined by the DM gate.
+            assert not any("turned off" in str(c).lower() for c in send.call_args_list)
+            ans.assert_called_once()
+    finally:
+        _exit(stack)
+
+
 # ── Rule 4: admin command in group → delete + dispatch ────────────────────
 def test_admin_command_in_group_deletes_and_dispatches():
     stack = _patches(is_admin=True)
@@ -439,6 +478,57 @@ def test_mention_of_bot_does_reply():
             from bot.ta.admin import route
 
             route(_msg(username="student", text=text, entities=[ent]))
+            ans.assert_called_once()
+    finally:
+        _exit(stack)
+
+
+# ── Rule 10b: group engagement gate ───────────────────────────────────────
+def test_unaddressed_group_question_dropped_when_engagement_off():
+    stack = _patches()
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.GROUP_ENGAGEMENT", False),
+            patch("bot.ta.admin._answer_question") as ans,
+        ):
+            from bot.ta.admin import route
+
+            route(_msg(username="student", text="what is a decorator?"))
+            ans.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_mention_still_answered_when_engagement_off():
+    stack = _patches()
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.GROUP_ENGAGEMENT", False),
+            patch("bot.ta.admin._answer_question") as ans,
+        ):
+            text = "hey @testbot help"
+            ent = _entity(offset=4, length=len("@testbot"))
+            from bot.ta.admin import route
+
+            route(_msg(username="student", text=text, entities=[ent]))
+            ans.assert_called_once()
+    finally:
+        _exit(stack)
+
+
+def test_engagement_off_does_not_affect_dms():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.GROUP_ENGAGEMENT", False),
+            patch("bot.ta.admin._answer_question") as ans,
+        ):
+            from bot.ta.admin import route
+
+            route(_msg(chat_type="private", chat_id=42, text="what is a decorator?"))
             ans.assert_called_once()
     finally:
         _exit(stack)

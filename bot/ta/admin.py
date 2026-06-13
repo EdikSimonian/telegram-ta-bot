@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import traceback
 
-from bot.config import TA_RATE_LIMIT, TA_RATE_LIMIT_WINDOW
+from bot.config import (
+    DMS_ENABLED,
+    GROUP_ENGAGEMENT,
+    TA_RATE_LIMIT,
+    TA_RATE_LIMIT_WINDOW,
+)
 from bot.ta import announcements, commands, quiz, welcome
 from bot.ta.prepare import Prepared, prepare
 from bot.ta.state import (
@@ -66,6 +71,18 @@ def route(message) -> None:
         _bookkeep(p)
     except Exception:
         traceback.print_exc()
+
+    # 1. DM gate: when DMs are disabled, students can't use the bot in private
+    #    chat — decline and point them back to the group. Admins are always
+    #    allowed through (they need DMs for /announce, /dm, and confirmation
+    #    flows). Checked first so even /start and /feedback are declined.
+    if p.is_dm and not p.is_admin and not DMS_ENABLED:
+        send_message(
+            p.chat_id,
+            "\U0001f6ab Direct messages are turned off. Please ask your "
+            "question in the course group so everyone can benefit.",
+        )
+        return
 
     # 3. /start always re-welcomes (not gated by the once-flag). In groups
     #    we send the group welcome and delete the command message to keep
@@ -155,6 +172,15 @@ def route(message) -> None:
     # 10. Mention of another user that is NOT the bot → ignore.
     if p.mentions_other_user and not p.is_mention:
         return
+
+    # 10b. Group engagement gate: when disabled, the bot only replies in
+    #      groups when directly addressed (@-mention or reply-to-bot).
+    #      Unaddressed chatter — even course questions — is left alone.
+    #      Admin commands and quiz answers are handled earlier, so this only
+    #      gates free-text Q&A. DMs are unaffected.
+    if not p.is_dm and not GROUP_ENGAGEMENT:
+        if not (p.is_mention or p.is_reply_to_bot):
+            return
 
     # 11. Rate limit.
     if _should_rate_limit(p):

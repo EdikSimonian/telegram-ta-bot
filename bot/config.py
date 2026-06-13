@@ -129,6 +129,27 @@ PERMANENT_ADMIN_ID = _parse_admin_id(os.environ.get("PERMANENT_ADMIN_ID", ""))
 # Human-readable instructor name for welcome messages + system prompt.
 INSTRUCTOR_NAME = os.environ.get("INSTRUCTOR_NAME", "Edik Simonian").strip()
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+# Whether students may interact with the bot in private (DM) chats. When
+# False: non-admin DMs are politely declined and pointed back to the group,
+# the bot never nudges students to message it privately, and the system
+# prompt is told not to suggest DMing. Admins can ALWAYS DM (needed for
+# /announce, /dm, and pending-confirmation flows). Default: enabled.
+DMS_ENABLED = _env_bool("DMS_ENABLED", True)
+
+# Whether the bot proactively engages with group chatter. When True (default)
+# it answers any course-related question in the group. When False it stays
+# quiet unless directly addressed — @-mentioned or replied to. Admin commands
+# and quiz answering are unaffected (those are handled before this gate).
+GROUP_ENGAGEMENT = _env_bool("GROUP_ENGAGEMENT", True)
+
 # TA bot: per-student questions in a rolling window (student-facing limit).
 TA_RATE_LIMIT = int(os.environ.get("TA_RATE_LIMIT", "10"))
 TA_RATE_LIMIT_WINDOW = int(os.environ.get("TA_RATE_LIMIT_WINDOW", "3600"))
@@ -192,6 +213,15 @@ SYSTEM_PROMPT = (
     "No HTML unless asked.\n"
     "Language: match the student's language. If they write in Armenian, reply in Armenian. If in Russian, reply in Russian. Default to English."
 )
+
+if not DMS_ENABLED:
+    # DMs are turned off for students, so never point them at a private chat.
+    SYSTEM_PROMPT += (
+        "\n\nIMPORTANT: Direct messages are disabled. Never suggest that the "
+        f"student DM you, DM the instructor (@{PERMANENT_ADMIN}), or continue "
+        "the conversation in private. Answer in the group, or tell them to ask "
+        "in the group."
+    )
 MAX_HISTORY = 20
 HISTORY_TTL = 2592000  # 30 days
 MAX_MSG_LEN = 4096

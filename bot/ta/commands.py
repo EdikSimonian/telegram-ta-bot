@@ -18,6 +18,8 @@ from bot.clients import bot as _bot
 from bot.config import (
     BOT_ENV,
     DEFAULT_MODEL,
+    DMS_ENABLED,
+    GROUP_ENGAGEMENT,
     PERMANENT_ADMIN,
     VALID_MODELS,
     VECTOR_NAMESPACE,
@@ -186,6 +188,8 @@ def _cmd_info(p: Prepared) -> None:
         f"Active group:  <code>{active_group}</code>",
         f"Context key:   <code>{group_key}</code>",
         f"Model:         <code>{model}</code>",
+        f"Direct messages: <code>{'on' if DMS_ENABLED else 'off'}</code>",
+        f"Group engagement: <code>{'on' if GROUP_ENGAGEMENT else 'mention-only'}</code>",
         f"Permanent admin: @{PERMANENT_ADMIN}",
     ]
     send_message(p.user_id, "\n".join(lines), parse_mode="HTML")

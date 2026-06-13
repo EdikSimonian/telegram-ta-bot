@@ -145,6 +145,8 @@ Read in `bot/config.py`. Every value is `.strip()`-ed to defend against trailing
 | `BLOB_PATH_PREFIX` | No | `docs/` | Multi-bot isolation |
 | `REDIS_PREFIX` | No | `ta:` | Multi-bot isolation |
 | `BOT_ENV` | No | `local` | Label for `/info` (`prod` / `test` / etc.) |
+| `DMS_ENABLED` | No | `true` | When `false`, non-admin DMs are declined (pointed back to the group) and the bot never nudges students to DM it; admins can always DM |
+| `GROUP_ENGAGEMENT` | No | `true` | When `false`, the bot only replies in groups when directly addressed (`@`-mention or reply-to-bot); unaddressed questions are left alone. Admin commands + quiz answering unaffected |
 | `PERMANENT_ADMIN` | No | `ediksimonian` | Username (lowercase) — fallback only |
 | `PERMANENT_ADMIN_ID` | **Strongly recommended** | — | Numeric Telegram user ID — primary admin gate |
 | `INSTRUCTOR_NAME` | No | `Edik Simonian` | Used in welcome + system prompt |

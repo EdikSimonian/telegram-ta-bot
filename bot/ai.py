@@ -20,6 +20,7 @@ import re
 from bot.clients import ai
 from bot.config import (
     DEFAULT_MODEL,
+    DMS_ENABLED,
     MAX_HISTORY,
     SYSTEM_PROMPT,
     TAVILY_API_KEY,
@@ -242,8 +243,8 @@ def _format_outbound(
         if sources:
             outbound = f"{outbound}\n\n<b>Sources:</b>\n" + "\n".join(sources[:5])
 
-    # In groups: nudge students to DM for follow-up.
-    if not is_dm:
+    # In groups: nudge students to DM for follow-up (only when DMs are on).
+    if not is_dm and DMS_ENABLED:
         outbound += "\n\n<i>DM me if you'd like to ask follow-up questions.</i>"
 
     return outbound
