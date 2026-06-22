@@ -84,8 +84,9 @@ def format_question_for_display(raw: str) -> str:
     """
     body = strip_answer_line(raw).strip()
     body = re.sub(r"^QUESTION:\s*", "", body, flags=re.IGNORECASE)
-    # Guarantee each option starts on its own line.
-    body = re.sub(r"\s*\n?([A-D])\)", r"\n\1)", body).lstrip("\n")
+    # Blank line before each option so the question and every choice are
+    # visually separated in the chat (question ↔ A ↔ B ↔ C ↔ D).
+    body = re.sub(r"\s*\n?([A-D])\)", r"\n\n\1)", body).lstrip("\n")
     return (
         "✨✨✨ <b>QUIZ TIME!</b> ✨✨✨\n\n"
         f"{_html.escape(body)}\n\n"

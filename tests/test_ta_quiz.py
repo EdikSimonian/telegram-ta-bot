@@ -92,10 +92,11 @@ def test_format_question_strips_answer_and_adds_newlines():
     out = format_question_for_display(raw)
     assert "ANSWER:" not in out
     assert "QUIZ TIME" in out
-    assert "\nA)" in out
-    assert "\nB)" in out
-    assert "\nC)" in out
-    assert "\nD)" in out
+    # Blank line before the question's first option and between each option.
+    assert "\n\nA)" in out
+    assert "\n\nB)" in out
+    assert "\n\nC)" in out
+    assert "\n\nD)" in out
 
 
 def test_format_question_escapes_html_entities_in_body():
