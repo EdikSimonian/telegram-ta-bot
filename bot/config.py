@@ -7,18 +7,38 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 # ── LLM provider (OpenAI-compatible) ──────────────────────────────────────
 AI_API_KEY = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.openai.com/v1").strip()
-MODEL = os.environ.get("AI_MODEL", "gpt-5.4-nano").strip()
-QUIZ_MODEL = os.environ.get("QUIZ_MODEL", "").strip() or MODEL
-
-# Models the /model admin command will accept. Kept tight on purpose:
-# this deployment targets OpenAI direct, and invalid model IDs just cause
-# 404s at request time. Extend when you add a second provider.
+# Models the /model admin command will accept, AND the allowlist AI_MODEL /
+# QUIZ_MODEL are validated against. Kept tight on purpose: invalid model IDs
+# just 400/404 at request time, so a typo'd env var (e.g. QUIZ_MODEL=gpt-5.4)
+# would otherwise silently break every chat / quiz. Extend when you add a model.
 VALID_MODELS = [
     # mini and nano stay on 5.4 — OpenAI shipped 5.5 only as the flagship.
     "gpt-5.4-nano",
     "gpt-5.4-mini",
     "gpt-5.5",
 ]
+_FALLBACK_MODEL = "gpt-5.4-nano"
+
+
+def _coerce_model(value: str, fallback: str) -> str:
+    """Return ``value`` if it's an allowed model, else ``fallback`` (logged).
+
+    Env-var models aren't user-gated the way /model input is, so a typo such as
+    ``QUIZ_MODEL=gpt-5.4`` would otherwise 400 every request. Fail safe to a
+    known-good model instead of silently breaking chat / quiz at request time.
+    """
+    if value not in VALID_MODELS:
+        print(
+            f"[config] model {value!r} not in VALID_MODELS {VALID_MODELS}; using {fallback!r}"
+        )
+        return fallback
+    return value
+
+
+MODEL = _coerce_model(
+    os.environ.get("AI_MODEL", _FALLBACK_MODEL).strip(), _FALLBACK_MODEL
+)
+QUIZ_MODEL = _coerce_model(os.environ.get("QUIZ_MODEL", "").strip() or MODEL, MODEL)
 DEFAULT_MODEL = MODEL
 
 # ── HF provider (legacy fallback; usually unset for TA bot) ───────────────
