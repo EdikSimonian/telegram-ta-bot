@@ -250,6 +250,7 @@ def stream_reply(message, on_chunk_factory) -> str | None:
     """
     from bot.ta.tg import delete_message as tg_delete_message
     from bot.ta.tg import edit_message as tg_edit_message
+    from bot.ta.tg import note_error as tg_note_error
 
     chat_id = message.chat.id
     is_group = getattr(message.chat, "type", "private") != "private"
@@ -289,11 +290,10 @@ def stream_reply(message, on_chunk_factory) -> str | None:
     }
 
     # Min seconds between streaming edits. Each editMessageText is a blocking
-    # HTTPS round-trip (~200-400ms) and Telegram allows roughly 1 edit/sec
-    # per chat — a tighter interval mostly burns webhook wall-time inside
-    # Telegram API calls (risking Telegram's read timeout + redelivery) and
-    # trips flood control.
-    edit_interval = 1.0
+    # HTTPS round-trip (~200-400ms). 3 edits/sec keeps the stream feeling live;
+    # edits to a single message are tolerated more than new sends, but watch
+    # for flood control (429) if this is pushed much higher.
+    edit_interval = 1.0 / 3  # 3 edits/sec
 
     # Streaming cursor appended to every in-progress partial (Hermes-style:
     # its stream consumer appends DEFAULT_STREAMING_CURSOR to each draft
@@ -361,7 +361,7 @@ def stream_reply(message, on_chunk_factory) -> str | None:
                     sent = bot.send_message(chat_id, head, **send_kwargs)
                     flushed_ids.append(getattr(sent, "message_id", None))
                 except Exception as e:
-                    print(f"[helpers] stream_reply flush send error: {e}")
+                    tg_note_error("send_message", chat_id, e)
                     break  # retry on the next chunk
                 # New segment → new draft_id: part N+1 must animate as a
                 # fresh bubble, not as a morph of part N's text (which
@@ -402,7 +402,7 @@ def stream_reply(message, on_chunk_factory) -> str | None:
                 last_sent = display
                 send_error = False  # clear on successful send
             except Exception as e:
-                print(f"[helpers] stream_reply send_message error: {e}")
+                tg_note_error("send_message", chat_id, e)
                 send_error = True
                 return False
         else:
@@ -434,8 +434,14 @@ def stream_reply(message, on_chunk_factory) -> str | None:
         chunks = _final_chunks(full_text or final_text, safe_limit)
         if chunks[0] != last_sent:
             tg_edit_message(chat_id, message_id, chunks[0], **edit_kwargs)
+        # Continuation chunks: a Telegram rejection here (bad HTML, too-long,
+        # flood) used to raise out / vanish into a 200. Record it so it
+        # surfaces as a Vercel error.
         for extra in chunks[1:]:
-            bot.send_message(chat_id, extra, **edit_kwargs)
+            try:
+                bot.send_message(chat_id, extra, **edit_kwargs)
+            except Exception as e:
+                tg_note_error("send_message", chat_id, e)
     elif final_text:
         # Draft transport: head chunks may already exist as flushed real
         # messages; the tail only ever lived in the draft bubble. Send the
@@ -460,10 +466,13 @@ def stream_reply(message, on_chunk_factory) -> str | None:
                 sent = bot.send_message(chat_id, remaining[0], **send_kwargs)
                 message_id = getattr(sent, "message_id", None)
             except Exception as e:
-                print(f"[helpers] stream_reply final send_message error: {e}")
+                tg_note_error("send_message", chat_id, e)
                 return None
             for extra in remaining[1:]:
-                bot.send_message(chat_id, extra, **edit_kwargs)
+                try:
+                    bot.send_message(chat_id, extra, **edit_kwargs)
+                except Exception as e:
+                    tg_note_error("send_message", chat_id, e)
 
     # Voice reply: if the originating message was a voice question, synthesize
     # and send voice alongside the text (matches old send_reply behavior).

@@ -54,7 +54,10 @@ HEDGING_PHRASES = (
     "i cannot answer that",
 )
 
-# Inappropriate content topics for teenage audience
+# Inappropriate content topics for teenage audience. Matched as whole words
+# (see _INAPPROPRIATE_RE) — NEVER bare substrings. Substring matching was a
+# real bug confirmed in prod: a benign answer containing "whatever" (-> "hate")
+# was suppressed, surfacing to the student as "Something went wrong."
 _INAPPROPRIATE_TOPICS = [
     "alcohol",
     "drugs",
@@ -73,6 +76,32 @@ _INAPPROPRIATE_TOPICS = [
     "gambling",
     "adult",
 ]
+
+# Whole-word match: \b on both edges so "sex" matches "sex" but not "Sussex",
+# and "hate" matches "hate" but not "whatever". The hyphen in "self-harm" is a
+# non-word char, so the surrounding \b still anchors correctly.
+_INAPPROPRIATE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in _INAPPROPRIATE_TOPICS) + r")\b",
+    re.IGNORECASE,
+)
+
+# A hedging *non-answer* is short and stops at the caveat. A long, useful reply
+# that pivots past the caveat ("…but here's how…") is a real answer — bias
+# toward delivering it, since suppressing surfaces as "Something went wrong."
+_MAX_HEDGE_LEN = 200
+_HEDGE_PIVOTS = (
+    " but ",
+    " however",
+    " though",
+    " instead",
+    "here's",
+    "here is",
+    "you can",
+    "you could",
+    "generally",
+    "try ",
+    "for example",
+)
 
 
 # ── Step 1: strip <think> blocks ──────────────────────────────────────────
@@ -100,15 +129,32 @@ def trim_leading_reasoning(text: str) -> str:
 
 # ── Step 5: hedging check ─────────────────────────────────────────────────
 def is_hedging(text: str) -> bool:
-    t = (text or "").lower()
-    return any(phrase in t for phrase in HEDGING_PHRASES)
+    """True only for short replies that are *purely* a hedge.
+
+    A long, helpful answer that merely contains a hedging phrase (opens with a
+    caveat then answers) is a real answer; suppressing it would surface as
+    "Something went wrong." So: hedge phrase present, no pivot to content, and
+    short.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if not any(phrase in low for phrase in HEDGING_PHRASES):
+        return False
+    if any(pivot in low for pivot in _HEDGE_PIVOTS):
+        return False
+    return len(t) <= _MAX_HEDGE_LEN
 
 
 # ── Step 6: inappropriate content check ───────────────────────────────────
 def is_inappropriate_content(text: str) -> bool:
-    """Check if the text contains inappropriate content for teens."""
-    t = (text or "").lower()
-    return any(topic in t for topic in _INAPPROPRIATE_TOPICS)
+    """Check if the text contains inappropriate content for teens.
+
+    Whole-word match only (see ``_INAPPROPRIATE_RE``). Bare-substring matching
+    here suppressed legitimate replies containing "whatever", "Sussex", etc.
+    """
+    return bool(_INAPPROPRIATE_RE.search(text or ""))
 
 
 # ── Step 4: ignore marker ─────────────────────────────────────────────────

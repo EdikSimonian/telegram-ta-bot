@@ -1,4 +1,5 @@
 import hmac
+import sys
 import traceback
 
 import telebot
@@ -7,6 +8,7 @@ import bot.handlers  # registers all handlers with the bot
 from bot.clients import bot
 from bot.config import BOT_ENV, PERMANENT_ADMIN, WEBHOOK_SECRET
 from bot.deploy_notice import notify_once
+from bot.ta import tg
 from bot.ta.state import get_user_chat, mark_update_seen
 
 app = Flask(__name__)
@@ -43,10 +45,27 @@ def webhook():
     if update is not None and getattr(update, "update_id", None) is not None:
         if not mark_update_seen(update.update_id):
             return "OK", 200
+    # Track Telegram API rejections during this update so a swallowed 400
+    # (bad HTML entities, "message too long", flood control) surfaces as a
+    # 500 in Vercel instead of a misleading 200. The dedup gate above means a
+    # Telegram retry of this same update_id is acked immediately, so returning
+    # 500 here does NOT cause a redelivery loop.
+    tg.reset_errors()
     try:
         bot.process_new_updates([update])
     except Exception:
+        # Non-Telegram bugs: ack 200 (dedup already guards redelivery) but the
+        # traceback is printed so it's still visible in Vercel.
         traceback.print_exc()
+    tg_errors = tg.errors()
+    if tg_errors:
+        print(
+            f"[WEBHOOK-ERROR] {len(tg_errors)} Telegram rejection(s) on update "
+            f"{getattr(update, 'update_id', None)}: {tg_errors}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return "Telegram rejected a response", 500
     return "OK", 200
 
 
