@@ -216,7 +216,13 @@ def ingest_one_file(
     return True
 
 
-BATCH_SIZE = 20  # files per QStash callback — ~40s on average, well under 60s cap
+BATCH_SIZE = 20  # hard upper bound on files per QStash callback
+# Chunk-heavy code files cost ~2-4s each (embedding round-trips dominate), so
+# 20 of them can spend ~57s just fetching+embedding — measured on a real repo
+# — which busts Vercel's 60s cap mid-batch, before the follow-up is published,
+# so ingest stalls. Time-box instead: stop after this budget and chain the
+# remainder. Adapts to file size (small docs → more per batch; big code → fewer).
+BATCH_TIME_BUDGET_SECONDS = 35
 
 
 def sync_repo_async(
@@ -395,8 +401,13 @@ def process_batch(payload: dict) -> dict:
     notify = payload.get("notifyChatId") or ""
     addedBy = payload.get("addedBy") or "github-fanout"
 
-    head, tail = paths[:BATCH_SIZE], paths[BATCH_SIZE:]
-    for entry in head:
+    # Time-box the batch so a run of chunk-heavy files can't blow past the 60s
+    # function cap before the follow-up is published. Stop at whichever comes
+    # first: the file cap or the time budget. The check is after each file, so
+    # the only overshoot is one file's ingest (well under the cap).
+    deadline = time.monotonic() + BATCH_TIME_BUDGET_SECONDS
+    processed = 0
+    for entry in paths:
         ok = ingest_one_file(
             owner,
             repo,
@@ -409,6 +420,10 @@ def process_batch(payload: dict) -> dict:
             added += 1
         else:
             skipped += 1
+        processed += 1
+        if processed >= BATCH_SIZE or time.monotonic() >= deadline:
+            break
+    tail = paths[processed:]
 
     if tail:
         # More work — publish follow-up. Failure here means the run is
