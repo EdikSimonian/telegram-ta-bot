@@ -86,13 +86,36 @@ def set_reaction(chat_id: int | str, message_id: int, emoji: str) -> bool:
         return False
 
 
-def send_message(chat_id: int | str, text: str, **kwargs) -> int | None:
+def _send_one(chat_id: int | str, text: str, **kwargs) -> int | None:
     try:
         msg = bot.send_message(chat_id, text, **kwargs)
         return getattr(msg, "message_id", None)
     except Exception as e:
         note_error("send_message", chat_id, e)
         return None
+
+
+def send_message(chat_id: int | str, text: str, **kwargs) -> int | None:
+    """Send ``text`` to ``chat_id``, auto-splitting overlong output.
+
+    List commands (/doc list, /git list, /stats, …) build one message from
+    ``"\\n".join(lines)``; once enough docs/repos are indexed that busts
+    Telegram's 4096-char hard limit and the whole send is rejected with 400
+    "message is too long". Split on line boundaries into <=MAX_MSG_LEN chunks —
+    each list row is one balanced-HTML line, so a line-boundary split keeps
+    every chunk parseable. Returns the message_id of the LAST chunk (callers
+    that need the id, e.g. quiz, send short single-message text).
+    """
+    from bot.config import MAX_MSG_LEN
+
+    if text and len(text) > MAX_MSG_LEN:
+        from bot.helpers import _split_for_telegram
+
+        last = None
+        for chunk in _split_for_telegram(text, MAX_MSG_LEN):
+            last = _send_one(chat_id, chunk, **kwargs)
+        return last
+    return _send_one(chat_id, text, **kwargs)
 
 
 def edit_message(chat_id: int | str, message_id: int, text: str, **kwargs) -> bool:
