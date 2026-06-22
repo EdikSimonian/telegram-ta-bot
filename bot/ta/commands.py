@@ -1060,6 +1060,22 @@ def _cmd_purge(p: Prepared) -> None:
 
 
 # ── /upgrade ──────────────────────────────────────────────────────────────
+# Prepended to the instructor's instruction so the routine ships via the
+# project's branch workflow: land on `test` (which auto-deploys to the test
+# bot via .github/workflows/deploy.yml) and propose promotion to prod with a
+# test → main PR. The routine's own claude.ai config must allow pushing to
+# `test` and basing PRs on `main` for this to take full effect.
+_UPGRADE_WORKFLOW = (
+    "Deliver this change using the project's branch workflow:\n"
+    "1. Implement the change and add/update tests; run the suite until green.\n"
+    "2. Commit and push to the `test` branch (do NOT push to `main`) — this "
+    "auto-deploys to the test bot via .github/workflows/deploy.yml.\n"
+    "3. Open a pull request from `test` into `main` so the instructor can "
+    "review and merge to production.\n\n"
+    "Change requested:\n"
+)
+
+
 @_register("upgrade")
 def _cmd_upgrade(p: Prepared) -> None:
     """Fire the self-upgrade Claude Code routine. Instructor only.
@@ -1088,7 +1104,7 @@ def _cmd_upgrade(p: Prepared) -> None:
         return
 
     try:
-        result = upgrade_mod.fire(instructions)
+        result = upgrade_mod.fire(_UPGRADE_WORKFLOW + instructions)
     except upgrade_mod.UpgradeError as e:
         send_message(
             p.user_id,
@@ -1100,10 +1116,11 @@ def _cmd_upgrade(p: Prepared) -> None:
     send_message(
         p.user_id,
         "✅ <b>Upgrade routine triggered.</b>\n"
-        "Claude is now editing the repo, writing tests, and opening a PR.\n\n"
+        "Claude will implement the change with tests, push to <code>test</code> "
+        "(which auto-deploys to the test bot), then open a "
+        "<code>test → main</code> PR for you to review and merge to prod.\n\n"
         f'Session: <a href="{html.escape(result.session_url)}">'
-        f"{html.escape(result.session_id)}</a>\n"
-        "You'll see the PR appear on the <code>test</code> branch when it's done.",
+        f"{html.escape(result.session_id)}</a>",
         parse_mode="HTML",
     )
 
