@@ -156,6 +156,11 @@ def route(message) -> None:
         # the current message flow through as normal chatter.
         if quiz.maybe_inline_reveal(p.chat_id):
             pass  # fall through — quiz is over, message is just text
+        elif quiz.is_webapp_quiz(p.chat_id):
+            # Web-app quiz: students answer privately in the Mini App, so we
+            # don't capture typed letters here and don't shush group chatter —
+            # the group can keep talking while the quiz runs.
+            pass  # fall through to normal routing
         else:
             letter = quiz.maybe_single_letter(p)
             if letter:

@@ -22,10 +22,12 @@ tabot/
 │   ├── index.py                  # Flask app — /api/webhook, /api/health, /api/notify-admin
 │   ├── autoreveal.py             # QStash callback — quiz auto-reveal after timeout
 │   ├── github.py                 # GitHub webhook receiver — re-ingest on push
-│   └── git_sync_batch.py         # QStash callback — batched repo file ingest
+│   ├── git_sync_batch.py         # QStash callback — batched repo file ingest
+│   └── quiz_app.py               # Quiz Mini App — serves page + serve/grade endpoints
 ├── bot/
 │   ├── __init__.py
 │   ├── config.py                 # ALL env vars + system prompt + RAG/quiz knobs
+│   ├── webapp.py                 # Telegram Mini App initData HMAC validation
 │   ├── clients.py                # Singleton bot/ai/embeddings/redis/vector clients
 │   ├── ai.py                     # ask_ai() — RAG retrieve → history → OpenAI → persist
 │   ├── search.py                 # Tavily web-search fallback (only when RAG misses)
@@ -154,6 +156,8 @@ Read in `bot/config.py`. Every value is `.strip()`-ed to defend against trailing
 | `TA_RATE_LIMIT_WINDOW` | No | `3600` (sec) | Rolling-window length |
 | `RATE_LIMIT` | No | `250` | Legacy daily cap (polling runner) |
 | `QUIZ_TIMEOUT_MINUTES` | No | `3` | Auto-reveal delay |
+| `MINIAPP_SHORT_NAME` | No | — | BotFather `/newapp` short name. Set (with `PROD_URL`) to run `/quiz` in Mini App mode — per-student shuffled options, answered in-app |
+| `WEBAPP_INIT_DATA_MAX_AGE` | No | `86400` | Max age (sec) of accepted Mini App `initData` (replay guard) |
 | `TAVILY_API_KEY` | No | — | Enables web-search fallback |
 | `GITHUB_TOKEN` | No | — | PAT for private repos / 60-rph limit |
 | `GITHUB_WEBHOOK_SECRET` | No | — | HMAC-SHA256 for `api/github.py` |
@@ -194,6 +198,20 @@ Registry lives in `bot/ta/commands.py`; each command supports sub-commands route
 - Students answer with a bare letter (A–D) — caught at admin-router step 5.
 - `/api/autoreveal` (QStash callback) verifies the JWT against `QSTASH_CURRENT_SIGNING_KEY` (with `NEXT` fallback for rotation), checks the quiz hasn't already been revealed (idempotent), reveals the answer + per-student tally.
 - Inline fallback: if the QStash callback is missed (rare), the next inbound message in the group triggers a stale-quiz check and reveals inline.
+
+### Mini App mode (anti-cheat)
+
+When `MINIAPP_SHORT_NAME` + `PROD_URL` are set (`QUIZ_WEBAPP_ENABLED`), `/quiz` switches from the typed-letter flow to a Telegram **Mini App** so students can't share answers:
+
+- The group message shows only the **question stem** + an "🧩 Open quiz" URL button → `t.me/<bot>/<MINIAPP_SHORT_NAME>?startapp=<token>` (a random per-quiz token, stored in Redis → chat id). A `web_app`-type button is private-chat-only, so groups must use the direct-link URL button.
+- The active-quiz dict gains `mode:"webapp"`, `options`, `correctIndex`, `token`. `correctAnswer` (canonical letter) is still stored so **`reveal_now` works unchanged** — the app records each student's choice as a canonical A–D letter into the same `quizAnswers` hash.
+- `api/quiz_app.py` serves the page (`GET /api/quiz-app`) and two POST endpoints (`/api/quiz/question`, `/api/quiz/answer`), both gated by `bot/webapp.py::validate_init_data` (HMAC over Telegram `initData`).
+- Each student gets a **deterministic per-user option order** (`quiz._user_option_order`, seeded with the bot token) so the correct *position* differs per person. Grading is server-side; **the correct option is never sent to the browser before the student commits**. Answers are one-shot (idempotent on `quizAnswers`).
+- The launch token is read from the **signed** `start_param` inside `initData`, not from the request body — a student can't retarget another chat's quiz.
+- Router step 7/8 skips typed-letter capture for `mode:"webapp"` quizzes, so the group can keep chatting while a quiz runs.
+- Falls back to the legacy text quiz automatically when unconfigured or when the LLM output doesn't parse into 4 clean options.
+
+**One-time setup:** BotFather `/newapp` per bot → Web App URL = `https://<PROD_URL>/api/quiz-app` → push `MINIAPP_SHORT_NAME` + redeploy.
 
 ---
 
@@ -319,7 +337,7 @@ After a `y`-answered push, run `make deploy` (or `deploy-prod` / `deploy-test`) 
 
 - **`threaded=False`** — required on `telebot.TeleBot`. Threads die when the serverless function returns.
 - **Vercel entrypoint filenames** — only specific names are auto-detected as Flask apps; `index.py` is one. The `vercel.json` rewrite from `/api/webhook` → `/api/index` exists because Vercel's path-based routing would otherwise look for a function literally named `webhook`.
-- **Per-function `maxDuration`** — `api/index.py` and `api/git_sync_batch.py` and `api/github.py` are pinned to 60s; `api/autoreveal.py` to 30s. All on `@vercel/python@4.3.0`.
+- **Per-function `maxDuration`** — `api/index.py` and `api/git_sync_batch.py` and `api/github.py` are pinned to 60s; `api/autoreveal.py` to 30s; `api/quiz_app.py` to 15s. All on `@vercel/python@4.3.0`.
 - **Env var newlines** — always use `--value` with `vercel env add`. Piping (`echo "..." | vercel env add`) appends a trailing newline that breaks URL parsing.
 - **OpenAI model IDs** — `VALID_MODELS` is intentionally tight (`gpt-5.4-nano`, `gpt-5.4-mini`, `gpt-5.5`). Add to that list before pointing `AI_MODEL` at a new model — invalid IDs just 404 at request time.
 - **Telegram 4096-char limit** — `bot/helpers.py` splits replies at `TG_CHUNK_LEN=4000` automatically.

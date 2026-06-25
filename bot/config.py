@@ -180,6 +180,19 @@ RATE_LIMIT = int(os.environ.get("RATE_LIMIT", "250"))
 QUIZ_TIMEOUT_MINUTES = int(os.environ.get("QUIZ_TIMEOUT_MINUTES", "3"))
 QUIZ_TIMEOUT_SECONDS = QUIZ_TIMEOUT_MINUTES * 60
 
+# ── Quiz Mini App (Telegram Web App) ──────────────────────────────────────
+# BotFather short name from `/newapp` (e.g. "quiz"). The quiz button links to
+# https://t.me/<bot>/<MINIAPP_SHORT_NAME>?startapp=<token>, which opens the
+# Mini App authenticated. When set (alongside PUBLIC_URL), /quiz runs in
+# web-app mode: options are shuffled per student and answered privately in the
+# app, so a shared "the answer is B" is worthless. Unset → legacy text quiz.
+MINIAPP_SHORT_NAME = os.environ.get("MINIAPP_SHORT_NAME", "").strip()
+# Max age (seconds) of a Mini App initData payload we'll accept — replay guard.
+WEBAPP_INIT_DATA_MAX_AGE = int(os.environ.get("WEBAPP_INIT_DATA_MAX_AGE", "86400"))
+# Web-app quiz mode engages only when we can both build the launch link
+# (short name) and serve the app + grade callbacks (public URL).
+QUIZ_WEBAPP_ENABLED = bool(PUBLIC_URL and MINIAPP_SHORT_NAME)
+
 # ── App ───────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = (
     f"You are the Teaching Assistant for the Summer 2026 AI Bot Workshop in "

@@ -127,3 +127,23 @@ def edit_message(chat_id: int | str, message_id: int, text: str, **kwargs) -> bo
     except Exception as e:
         note_error("edit_message", chat_id, e, message_id=message_id)
         return False
+
+
+def edit_message_quiet(
+    chat_id: int | str, message_id: int, text: str, **kwargs
+) -> bool:
+    """Best-effort edit that never records a rejection.
+
+    For cosmetic updates (e.g. marking a quiz message expired): a failure
+    here — message >48h old, already edited, identical content — must not turn
+    the whole webhook into a 500. Editing without a ``reply_markup`` kwarg also
+    drops any inline keyboard, which is how we remove a dead quiz's button.
+    """
+    try:
+        bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text, **kwargs
+        )
+        return True
+    except Exception as e:
+        print(f"[ta.tg] edit_message_quiet error chat={chat_id} msg={message_id}: {e}")
+        return False

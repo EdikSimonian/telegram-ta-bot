@@ -4,7 +4,10 @@
     { "source": "/api/webhook", "destination": "/api/index" },
     { "source": "/api/health", "destination": "/api/index" },
     { "source": "/api/notify-admin", "destination": "/api/index" },
-    { "source": "/api/git-sync-batch", "destination": "/api/git_sync_batch" }
+    { "source": "/api/git-sync-batch", "destination": "/api/git_sync_batch" },
+    { "source": "/api/quiz-app", "destination": "/api/quiz_app" },
+    { "source": "/api/quiz/question", "destination": "/api/quiz_app" },
+    { "source": "/api/quiz/answer", "destination": "/api/quiz_app" }
   ],
   "functions": {
     "api/index.py": {
@@ -21,6 +24,10 @@
     },
     "api/git_sync_batch.py": {
       "maxDuration": 60,
+      "runtime": "@vercel/python@4.3.0"
+    },
+    "api/quiz_app.py": {
+      "maxDuration": 15,
       "runtime": "@vercel/python@4.3.0"
     }
   }

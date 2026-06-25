@@ -183,6 +183,51 @@ def test_generate_question_includes_history_in_prompt():
         assert "prior q 1" in prompt
 
 
+def test_generate_question_grounds_in_course_material():
+    """When RAG returns course chunks, the prompt instructs the LLM to base the
+    question strictly on them — the real defense against external-LLM cheating."""
+    matches = [
+        {
+            "title": "Lecture 3",
+            "chunkText": "Python lists are mutable.",
+            "blobUrl": "",
+            "score": 0.91,
+        }
+    ]
+    with (
+        patch("bot.ta.quiz.ai") as client,
+        patch("bot.ta.quiz.get_quiz_history", return_value=[]),
+        patch("bot.ta.rag.retrieve", return_value=matches),
+    ):
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=_mock_llm_quiz("A")))]
+        )
+        from bot.ta.quiz import generate_question
+
+        generate_question("python", "-100123")
+        prompt = client.chat.completions.create.call_args.kwargs["messages"][0][
+            "content"
+        ]
+        assert "Python lists are mutable." in prompt
+        assert "STRICTLY" in prompt
+
+
+def test_generate_question_grounding_degrades_when_rag_raises():
+    """A RAG failure must not break quiz generation — fall back to generic."""
+    with (
+        patch("bot.ta.quiz.ai") as client,
+        patch("bot.ta.quiz.get_quiz_history", return_value=[]),
+        patch("bot.ta.rag.retrieve", side_effect=RuntimeError("vector down")),
+    ):
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=_mock_llm_quiz("B")))]
+        )
+        from bot.ta.quiz import generate_question
+
+        out = generate_question("python", "-100123")
+        assert out is not None and out[1] == "B"
+
+
 # ── start_quiz ────────────────────────────────────────────────────────────
 def test_start_quiz_sets_state_and_schedules():
     with (

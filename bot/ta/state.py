@@ -102,6 +102,11 @@ def _k_quiz_answers(chat_id: int | str) -> str:
     return f"{_P}quizAnswers:{chat_id}"
 
 
+def _k_quiz_token(token: str) -> str:
+    """Maps a Mini App launch token back to its chat id (TTL'd)."""
+    return f"{_P}quizToken:{token}"
+
+
 def _k_pending_announcement(admin_id: int | str) -> str:
     return f"{_P}pendingAnnouncement:{admin_id}"
 
@@ -801,6 +806,40 @@ def get_quiz_answers(chat_id: int | str) -> dict[str, dict]:
 
 def clear_quiz_answers(chat_id: int | str) -> None:
     _safe(lambda: redis.delete(_k_quiz_answers(chat_id)))
+
+
+def has_quiz_answer(chat_id: int | str, user_id: int | str) -> bool:
+    """True if this student already answered the active quiz (one-shot gate)."""
+    return bool(
+        _safe(
+            lambda: redis.hexists(_k_quiz_answers(chat_id), str(user_id)),
+            default=False,
+        )
+    )
+
+
+# ── Quiz Mini App launch tokens ───────────────────────────────────────────
+# The /quiz button carries a random, unguessable token (not the chat id) so a
+# student can't enumerate other chats' quizzes by editing the start_param. The
+# token resolves to its chat id here, TTL'd to a little past the quiz window.
+def set_quiz_token(token: str, chat_id: int | str, ttl: int) -> None:
+    if redis is None:
+        return
+    try:
+        redis.set(_k_quiz_token(token), str(chat_id), ex=ttl)
+    except Exception as e:
+        print(f"[ta.state] set_quiz_token error: {e}")
+
+
+def get_quiz_token_chat(token: str) -> str | None:
+    if not token:
+        return None
+    return _safe(lambda: redis.get(_k_quiz_token(token)), default=None)
+
+
+def clear_quiz_token(token: str) -> None:
+    if token:
+        _safe(lambda: redis.delete(_k_quiz_token(token)))
 
 
 def list_active_quizzes() -> list[dict]:
