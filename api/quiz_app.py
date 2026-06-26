@@ -131,8 +131,13 @@ _PAGE_HTML = """<!doctype html>
   .opt.wrong { border-color: var(--bad); }
   .opt.wrong .letter { background: var(--bad); }
   .opt.dim { opacity: .55; }
-  #result { text-align: center; font-weight: 700; font-size: 17px; margin-top: 18px; min-height: 22px; }
-  #status { text-align: center; color: var(--hint); margin-top: 40px; }
+  #result { text-align: center; font-weight: 700; font-size: 19px; margin-top: 22px; min-height: 22px; }
+  #detail {
+    text-align: center; color: var(--text); font-size: 15px; margin-top: 10px;
+    white-space: pre-wrap;
+  }
+  #detail .opttext { font-weight: 600; }
+  #status { text-align: center; color: var(--hint); margin-top: 40px; white-space: pre-wrap; }
   .hidden { display: none; }
 </style>
 </head>
@@ -141,6 +146,7 @@ _PAGE_HTML = """<!doctype html>
   <div id="question" class="hidden"></div>
   <div id="options"></div>
   <div id="result"></div>
+  <div id="detail"></div>
   <div id="status">Loading…</div>
 
 <script>
@@ -178,10 +184,11 @@ _PAGE_HTML = """<!doctype html>
   var qEl = document.getElementById("question");
   var optsEl = document.getElementById("options");
   var resultEl = document.getElementById("result");
+  var detailEl = document.getElementById("detail");
   var timerEl = document.getElementById("timer");
   var LETTERS = ["A", "B", "C", "D"];
   var answered = false;
-  var countdown = null;
+  var countdown = null, polling = null;
 
   function api(path, body) {
     return fetch(path, {
@@ -191,11 +198,25 @@ _PAGE_HTML = """<!doctype html>
     }).then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); });
   }
 
+  function clearTimers() {
+    if (countdown) { clearInterval(countdown); countdown = null; }
+    if (polling) { clearInterval(polling); polling = null; }
+  }
+
+  // Hide every panel; callers reveal the ones they need.
+  function reset() {
+    qEl.classList.add("hidden"); optsEl.innerHTML = "";
+    resultEl.textContent = ""; detailEl.innerHTML = "";
+    statusEl.classList.add("hidden");
+  }
+
+  function fmt(secs) {
+    var m = Math.floor(secs / 60), s = secs % 60;
+    return m + ":" + (s < 10 ? "0" + s : s);
+  }
+
   function ended(msg) {
-    if (countdown) clearInterval(countdown);
-    qEl.classList.add("hidden");
-    optsEl.innerHTML = "";
-    resultEl.textContent = "";
+    clearTimers(); reset(); timerEl.textContent = "";
     statusEl.textContent = msg || "This quiz has ended.";
     statusEl.classList.remove("hidden");
   }
@@ -204,85 +225,133 @@ _PAGE_HTML = """<!doctype html>
     var e = res.body && res.body.error;
     if (res.status === 401) return ended("Couldn't verify you with Telegram — reopen from the quiz button.");
     if (e === "no_token") return ended("Open this from the 🧩 button on a quiz message (not the bare app link).");
-    if (e === "expired") return ended("⏰ Time's up — this quiz is over.");
     return ended("This quiz has ended.");
   }
 
-  function startTimer(secs) {
-    if (secs == null) return;
+  // Countdown that calls onZero() when it reaches 0.
+  function startCountdown(secs, onZero) {
+    clearTimers();
+    if (secs == null) { return; }
     function tick() {
       if (secs <= 0) {
         timerEl.textContent = "Time's up";
-        clearInterval(countdown);
-        if (!answered) lockOptions();
+        if (countdown) { clearInterval(countdown); countdown = null; }
+        if (onZero) onZero();
         return;
       }
-      var m = Math.floor(secs / 60), s = secs % 60;
-      timerEl.textContent = "⏰ " + m + ":" + (s < 10 ? "0" + s : s);
+      timerEl.textContent = "⏰ " + fmt(secs);
       secs -= 1;
     }
     tick();
     countdown = setInterval(tick, 1000);
   }
 
-  function lockOptions() {
-    var btns = optsEl.querySelectorAll(".opt");
-    for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+  // ── States ──────────────────────────────────────────────────────────────
+  function renderLive(data) {
+    reset(); clearTimers(); answered = false;
+    qEl.textContent = data.question; qEl.classList.remove("hidden");
+    data.options.forEach(function (text, i) {
+      var b = document.createElement("button");
+      b.className = "opt";
+      var badge = document.createElement("span");
+      badge.className = "letter"; badge.textContent = LETTERS[i];
+      var label = document.createElement("span"); label.textContent = text;
+      b.appendChild(badge); b.appendChild(label);
+      b.addEventListener("click", function () { choose(i); });
+      optsEl.appendChild(b);
+    });
+    startCountdown(data.remainingSeconds, pollForResult);
   }
 
-  function paintResult(data) {
-    answered = true;
-    lockOptions();
-    var btns = optsEl.querySelectorAll(".opt");
-    for (var i = 0; i < btns.length; i++) btns[i].classList.add("dim");
-    if (typeof data.correctPosition === "number" && btns[data.correctPosition]) {
-      btns[data.correctPosition].classList.remove("dim");
-      btns[data.correctPosition].classList.add("correct");
+  function renderAccepted(remaining) {
+    reset();
+    resultEl.textContent = "✅ Response accepted";
+    resultEl.style.color = "var(--ok)";
+    detailEl.textContent = "Sit tight — you'll find out if you got it right when the quiz ends.";
+    detailEl.classList.remove("hidden");
+    startCountdown(remaining, pollForResult);
+  }
+
+  function renderPending() {
+    clearTimers(); reset(); timerEl.textContent = "";
+    statusEl.textContent = "⏳ Time's up — tallying results…";
+    statusEl.classList.remove("hidden");
+  }
+
+  function optSpan(text) {
+    var s = document.createElement("span");
+    s.className = "opttext"; s.textContent = text || "";
+    return s;
+  }
+
+  function renderEnded(data) {
+    clearTimers(); reset(); timerEl.textContent = "";
+    detailEl.innerHTML = "";
+    if (data.answered) {
+      resultEl.textContent = data.correct ? "✅ You got it right!" : "❌ Not quite.";
+      resultEl.style.color = data.correct ? "var(--ok)" : "var(--bad)";
+      if (!data.correct) {
+        detailEl.appendChild(document.createTextNode("You picked: "));
+        detailEl.appendChild(optSpan(data.yourOption));
+        detailEl.appendChild(document.createElement("br"));
+      }
+      if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(data.correct ? "success" : "error");
+    } else {
+      resultEl.textContent = "⏰ Quiz ended";
+      resultEl.style.color = "var(--hint)";
+      detailEl.appendChild(document.createTextNode("You didn't answer in time. "));
     }
-    if (!data.correct && typeof data.yourPosition === "number" && btns[data.yourPosition]) {
-      btns[data.yourPosition].classList.remove("dim");
-      btns[data.yourPosition].classList.add("wrong");
+    detailEl.appendChild(document.createTextNode("Correct answer: "));
+    detailEl.appendChild(optSpan(data.correctOption));
+    detailEl.classList.remove("hidden");
+  }
+
+  function dispatch(data) {
+    switch (data.state) {
+      case "live": return renderLive(data);
+      case "accepted": return renderAccepted(data.remainingSeconds);
+      case "pending": return renderPending();
+      case "ended": return renderEnded(data);
+      default: return ended();
     }
-    resultEl.textContent = data.correct ? "✅ Correct!" : "❌ Not quite.";
-    resultEl.style.color = data.correct ? "var(--ok)" : "var(--bad)";
-    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(data.correct ? "success" : "error");
   }
 
   function choose(i) {
     if (answered) return;
     answered = true;
-    lockOptions();
+    var btns = optsEl.querySelectorAll(".opt");
+    for (var k = 0; k < btns.length; k++) btns[k].disabled = true;
     api("/api/quiz/answer", { position: i }).then(function (res) {
       if (!res.body.ok) { failMsg(res); return; }
-      paintResult(res.body);
-    }).catch(function () { answered = false; lockOptions(); });
+      refresh();  // server now reports state "accepted" with the real time left
+    }).catch(function () { answered = false; ended("Network hiccup — reopen the quiz."); });
   }
 
-  function render(data) {
-    statusEl.classList.add("hidden");
-    qEl.textContent = data.question;
-    qEl.classList.remove("hidden");
-    optsEl.innerHTML = "";
-    data.options.forEach(function (text, i) {
-      var b = document.createElement("button");
-      b.className = "opt";
-      var badge = document.createElement("span");
-      badge.className = "letter";
-      badge.textContent = LETTERS[i];
-      var label = document.createElement("span");
-      label.textContent = text;
-      b.appendChild(badge); b.appendChild(label);
-      b.addEventListener("click", function () { choose(i); });
-      optsEl.appendChild(b);
-    });
-    startTimer(data.remainingSeconds);
-    if (data.answered) paintResult(data);
+  function refresh() {
+    return api("/api/quiz/question").then(function (res) {
+      if (!res.body.ok) { failMsg(res); return; }
+      dispatch(res.body);
+    }).catch(function () { ended("Couldn't load the quiz. Try again."); });
   }
 
-  api("/api/quiz/question").then(function (res) {
-    if (!res.body.ok) { failMsg(res); return; }
-    render(res.body);
-  }).catch(function () { ended("Couldn't load the quiz. Try again."); });
+  // After time runs out, poll until the server has the finalised result.
+  function pollForResult() {
+    renderPending();
+    var tries = 0;
+    function check() {
+      tries += 1;
+      api("/api/quiz/question").then(function (res) {
+        if (res.body.state === "ended") { clearTimers(); renderEnded(res.body); }
+        else if (!res.body.ok) { failMsg(res); }
+        else if (tries >= 12) { ended("⏰ Quiz over — results were posted in the group."); }
+      }).catch(function () {});
+    }
+    clearTimers();
+    check();
+    polling = setInterval(check, 3000);
+  }
+
+  refresh();
 })();
 </script>
 </body>

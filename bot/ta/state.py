@@ -818,6 +818,11 @@ def has_quiz_answer(chat_id: int | str, user_id: int | str) -> bool:
     )
 
 
+def count_quiz_answers(chat_id: int | str) -> int:
+    """Number of distinct students who've answered the active quiz."""
+    return int(_safe(lambda: redis.hlen(_k_quiz_answers(chat_id)), default=0) or 0)
+
+
 # ── Quiz Mini App launch tokens ───────────────────────────────────────────
 # The /quiz button carries a random, unguessable token (not the chat id) so a
 # student can't enumerate other chats' quizzes by editing the start_param. The
@@ -840,6 +845,39 @@ def get_quiz_token_chat(token: str) -> str | None:
 def clear_quiz_token(token: str) -> None:
     if token:
         _safe(lambda: redis.delete(_k_quiz_token(token)))
+
+
+# ── Quiz result snapshot (for deferred in-app reveal) ─────────────────────
+# Written at reveal time and keyed by the launch token, so a student can
+# reopen the Mini App after the quiz closes and see their OWN result — the
+# active-quiz + answers hashes are deleted on reveal, so we snapshot what the
+# app needs (options, correct index, each user's chosen letter) here.
+QUIZ_RESULT_TTL = 3600
+
+
+def _k_quiz_result(token: str) -> str:
+    return f"{_P}quizResult:{token}"
+
+
+def set_quiz_result(token: str, data: dict, ttl: int = QUIZ_RESULT_TTL) -> None:
+    if redis is None or not token:
+        return
+    try:
+        redis.set(_k_quiz_result(token), json.dumps(data), ex=ttl)
+    except Exception as e:
+        print(f"[ta.state] set_quiz_result error: {e}")
+
+
+def get_quiz_result(token: str) -> dict | None:
+    if not token:
+        return None
+    raw = _safe(lambda: redis.get(_k_quiz_result(token)), default=None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def list_active_quizzes() -> list[dict]:

@@ -44,6 +44,7 @@ def test_parse_question_parts_happy():
         "question": "What is 2+2?",
         "options": ["3", "4", "5", "22"],
         "correctIndex": 1,
+        "topic": "",  # no TOPIC line in RAW
     }
 
 
@@ -98,8 +99,8 @@ def test_submit_correct_position_scores_right():
     with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer") as rec:
         out = submit_answer("tok123", {"id": 42, "first_name": "Alice"}, correct_pos)
     assert out["ok"] is True
-    assert out["correct"] is True
-    assert out["correctPosition"] == correct_pos
+    assert out["accepted"] is True
+    assert "correct" not in out  # verdict withheld until the quiz ends
     # Recorded as the canonical letter so reveal_now tallies correctly.
     assert rec.call_args.args[2]["letter"] == "B"
 
@@ -113,7 +114,8 @@ def test_submit_wrong_position_scores_wrong():
     p1, p2, p3, p4 = _patches(active)
     with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer") as rec:
         out = submit_answer("tok123", {"id": 42}, wrong_pos)
-    assert out["correct"] is False
+    assert out["accepted"] is True
+    assert "correct" not in out  # no verdict at answer time
     assert rec.call_args.args[2]["letter"] != "B"
 
 
@@ -125,8 +127,9 @@ def test_submit_is_one_shot():
     p1, p2, p3, p4 = _patches(active, answered=True, answers=answers)
     with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer") as rec:
         out = submit_answer("tok123", {"id": 42}, 0)
+    assert out["accepted"] is True
     assert out["alreadyAnswered"] is True
-    assert out["correct"] is False  # their stored "A" != correct "B"
+    assert "correct" not in out  # no verdict, even on re-tap
     rec.assert_not_called()  # no overwrite
 
 
@@ -152,15 +155,15 @@ def test_serve_empty_token_is_no_token():
     assert serve_quiz("", {"id": 42})["error"] == "no_token"
 
 
-def test_serve_expired_is_expired():
+def test_serve_pending_when_expired_no_result_yet():
     from bot.ta.quiz import serve_quiz
 
-    active = _active(startTime=1)  # ancient → expired
+    active = _active(startTime=1)  # ancient → expired, not yet revealed
     p1, p2, p3, p4 = _patches(active)
-    with p1, p2, p3, p4:
+    with p1, p2, p3, p4, patch("bot.ta.state.get_quiz_result", return_value=None):
         out = serve_quiz("tok123", {"id": 42})
-    assert out["ok"] is False
-    assert out["error"] == "expired"
+    assert out["ok"] is True
+    assert out["state"] == "pending"
 
 
 def test_submit_rejects_out_of_range_position():
@@ -173,31 +176,54 @@ def test_submit_rejects_out_of_range_position():
 
 
 # ── serve_quiz ────────────────────────────────────────────────────────────
-def test_serve_hides_correct_position_until_answered():
+def test_serve_live_returns_shuffled_options_no_verdict():
     from bot.ta.quiz import serve_quiz
 
     active = _active()
-    p1, p2, p3, p4 = _patches(active)
+    p1, p2, p3, p4 = _patches(active)  # answered=False
     with p1, p2, p3, p4:
         out = serve_quiz("tok123", {"id": 42})
-    assert out["ok"] is True
-    assert out["answered"] is False
-    assert "correctPosition" not in out  # never leak before commit
+    assert out["state"] == "live"
+    # No verdict / correct option leaked while the quiz is running.
+    assert "correct" not in out and "correctOption" not in out
     assert sorted(out["options"]) == ["22", "3", "4", "5"]  # all 4, some order
 
 
-def test_serve_shows_result_after_answered():
-    from bot.ta.quiz import _user_option_order, serve_quiz
+def test_serve_accepted_when_answered_and_live():
+    from bot.ta.quiz import serve_quiz
 
     active = _active()
-    order = _user_option_order(CHAT, MSG, 42)
-    answers = {"42": {"letter": "B"}}  # they got it right
+    answers = {"42": {"letter": "B"}}
     p1, p2, p3, p4 = _patches(active, answered=True, answers=answers)
     with p1, p2, p3, p4:
         out = serve_quiz("tok123", {"id": 42})
-    assert out["answered"] is True
-    assert out["correct"] is True
-    assert out["correctPosition"] == order.index(1)
+    assert out["state"] == "accepted"
+    assert "correct" not in out  # still no verdict while the quiz runs
+    assert "options" not in out  # don't re-serve the question
+
+
+def test_serve_ended_shows_each_students_own_result():
+    from bot.ta.quiz import serve_quiz
+
+    result = {
+        "correctIndex": 1,
+        "options": ["3", "4", "5", "22"],
+        "answers": {"42": "B", "99": "C"},
+    }
+    # No active quiz (revealed) → serve reads the persisted result snapshot.
+    with (
+        patch("bot.ta.quiz.get_quiz_token_chat", return_value=None),
+        patch("bot.ta.state.get_quiz_result", return_value=result),
+    ):
+        right = serve_quiz("tok123", {"id": 42})
+        wrong = serve_quiz("tok123", {"id": 99})
+        none = serve_quiz("tok123", {"id": 7})  # didn't answer
+    assert right["state"] == "ended"
+    assert right["answered"] is True and right["correct"] is True
+    assert right["correctOption"] == "4"
+    assert wrong["correct"] is False
+    assert wrong["yourOption"] == "5" and wrong["correctOption"] == "4"
+    assert none["answered"] is False and none["correctOption"] == "4"
 
 
 # ── start_quiz web-app path ───────────────────────────────────────────────
@@ -212,6 +238,7 @@ def test_start_quiz_webapp_posts_button_and_stores_mode():
         patch("bot.ta.quiz.push_quiz_history"),
         patch("bot.ta.quiz.bump_total_quizzes"),
         patch("bot.ta.quiz._schedule_autoreveal", return_value=True),
+        patch("bot.ta.quiz.schedule_quiz_tick") as tick,
     ):
         from bot.ta.quiz import start_quiz
 
@@ -219,6 +246,7 @@ def test_start_quiz_webapp_posts_button_and_stores_mode():
 
         state = set_q.call_args.args[1]
         assert state["mode"] == "webapp"
+        tick.assert_called_once()  # live answered-counter started
         assert state["options"] == ["3", "4", "5", "22"]
         assert state["correctIndex"] == 1
         assert state["correctAnswer"] == "B"  # keeps reveal_now working
@@ -280,6 +308,33 @@ def test_reveal_expires_webapp_message_and_drops_button():
         assert "reply_markup" not in kwargs
 
 
+def test_reveal_writes_result_snapshot():
+    active = _active(questionMessageId=699, token="tok123")
+    answers = {
+        "42": {"letter": "B", "firstName": "Alice"},
+        "99": {"letter": "C", "firstName": "Bob"},
+    }
+    with (
+        patch("bot.ta.quiz.get_active_quiz", return_value=active),
+        patch("bot.ta.quiz.get_quiz_answers", return_value=answers),
+        patch("bot.ta.quiz.record_quiz_score"),
+        patch("bot.ta.quiz.update_streak", return_value=0),
+        patch("bot.ta.quiz.clear_active_quiz"),
+        patch("bot.ta.quiz.send_message"),
+        patch("bot.ta.tg.edit_message_quiet"),
+        patch("bot.ta.state.set_quiz_result") as setres,
+    ):
+        from bot.ta.quiz import reveal_now
+
+        reveal_now(CHAT)
+        setres.assert_called_once()
+        tok, data = setres.call_args.args[0], setres.call_args.args[1]
+        assert tok == "tok123"
+        assert data["correctIndex"] == 1
+        assert data["options"] == ["3", "4", "5", "22"]
+        assert data["answers"] == {"42": "B", "99": "C"}
+
+
 def test_reveal_legacy_quiz_does_not_edit_message():
     active = {  # legacy text quiz — no mode
         "correctAnswer": "B",
@@ -310,3 +365,93 @@ def test_is_webapp_quiz():
         assert is_webapp_quiz(CHAT) is False
     with patch("bot.ta.quiz.get_active_quiz", return_value=None):
         assert is_webapp_quiz(CHAT) is False
+
+
+# ── generated topic ───────────────────────────────────────────────────────
+def test_parse_question_parts_extracts_topic():
+    from bot.ta.quiz import parse_question_parts
+
+    raw = RAW + "\nTOPIC: Basic Arithmetic"
+    out = parse_question_parts(raw)
+    assert out["topic"] == "Basic Arithmetic"
+    assert out["question"] == "What is 2+2?"  # TOPIC not folded into the stem
+
+
+def test_start_quiz_webapp_uses_generated_topic():
+    raw = "QUESTION: q?\nA) a\nB) b\nC) c\nD) d\nANSWER: A\nTOPIC: Recursion Basics"
+    with (
+        patch("bot.ta.quiz.QUIZ_WEBAPP_ENABLED", True),
+        patch("bot.ta.quiz.get_active_quiz", return_value=None),
+        patch("bot.ta.quiz.generate_question", return_value=(raw, "A")),
+        patch("bot.ta.quiz.send_message", return_value=MSG) as sm,
+        patch("bot.ta.quiz.set_active_quiz") as set_q,
+        patch("bot.ta.quiz.set_quiz_token"),
+        patch("bot.ta.quiz.push_quiz_history"),
+        patch("bot.ta.quiz.bump_total_quizzes"),
+        patch("bot.ta.quiz._schedule_autoreveal", return_value=True),
+        patch("bot.ta.quiz.schedule_quiz_tick"),
+    ):
+        from bot.ta.quiz import start_quiz
+
+        start_quiz(_prepared(), "", CHAT)  # no instructor topic
+        assert "Recursion Basics" in sm.call_args_list[0].args[1]
+        assert set_q.call_args.args[1]["topic"] == "Recursion Basics"
+
+
+# ── live answered-counter (tick_quiz) ─────────────────────────────────────
+def test_tick_quiz_edits_count_and_keeps_button():
+    active = _active(questionMessageId=MSG, topic="python")
+    with (
+        patch("bot.ta.quiz.get_active_quiz", return_value=active),
+        patch("bot.ta.state.count_quiz_answers", return_value=3),
+        patch("bot.ta.tg.edit_message_quiet") as edit,
+    ):
+        from bot.ta.quiz import tick_quiz
+
+        assert tick_quiz(CHAT, MSG, "tok123") is True
+        args, kwargs = edit.call_args
+        assert args[0] == CHAT and args[1] == MSG
+        assert "3" in args[2] and "answered" in args[2]
+        assert kwargs.get("reply_markup") is not None  # button preserved
+
+
+def test_tick_quiz_stops_when_gone_replaced_or_expired():
+    from bot.ta.quiz import tick_quiz
+
+    with patch("bot.ta.quiz.get_active_quiz", return_value=None):
+        assert tick_quiz(CHAT, MSG, "tok123") is False
+    with patch(
+        "bot.ta.quiz.get_active_quiz", return_value=_active(questionMessageId=999)
+    ):
+        assert tick_quiz(CHAT, MSG, "tok123") is False  # newer quiz, different msg
+    with patch("bot.ta.quiz.get_active_quiz", return_value=_active(startTime=1)):
+        assert tick_quiz(CHAT, MSG, "tok123") is False  # expired
+
+
+def test_count_quiz_answers_uses_hlen():
+    import bot.ta.state as state
+
+    with patch.object(state, "redis") as r:
+        r.hlen.return_value = 4
+        assert state.count_quiz_answers(CHAT) == 4
+
+
+# ── reveal spells out question + full answer ──────────────────────────────
+def test_reveal_webapp_message_has_question_and_full_answer():
+    active = _active(questionMessageId=699, token="tok123")
+    with (
+        patch("bot.ta.quiz.get_active_quiz", return_value=active),
+        patch("bot.ta.quiz.get_quiz_answers", return_value={}),
+        patch("bot.ta.quiz.record_quiz_score"),
+        patch("bot.ta.quiz.update_streak", return_value=0),
+        patch("bot.ta.quiz.clear_active_quiz"),
+        patch("bot.ta.quiz.send_message") as sm,
+        patch("bot.ta.tg.edit_message_quiet"),
+        patch("bot.ta.state.set_quiz_result"),
+    ):
+        from bot.ta.quiz import reveal_now
+
+        reveal_now(CHAT)
+        text = sm.call_args.args[1]
+        assert "What is 2+2?" in text  # full question text
+        assert "B) 4" in text  # full correct option, not just the letter

@@ -112,16 +112,22 @@ def parse_question_parts(raw: str) -> dict | None:
         question = re.sub(r"(?i)^\s*QUESTION:\s*", "", question.strip()).strip()
     if not question:
         return None
+    # Optional TOPIC line (a short label the LLM derives from its own question).
+    tm = re.search(r"(?im)^\s*TOPIC:\s*(.+?)\s*$", raw)
+    topic = tm.group(1).strip()[:60] if tm else ""
     return {
         "question": question,
         "options": options,
         "correctIndex": "ABCD".index(letter),
+        "topic": topic,
     }
 
 
 def strip_answer_line(text: str) -> str:
-    """Remove the ANSWER: X line from the LLM output before displaying."""
-    return re.sub(r"(?mi)^\s*ANSWER:\s*[A-Da-d].*$\n?", "", text).rstrip()
+    """Remove the ANSWER: and TOPIC: lines from LLM output before displaying."""
+    text = re.sub(r"(?mi)^\s*ANSWER:\s*[A-Da-d].*$\n?", "", text)
+    text = re.sub(r"(?mi)^\s*TOPIC:\s*.*$\n?", "", text)
+    return text.rstrip()
 
 
 def format_question_for_display(raw: str) -> str:
@@ -204,7 +210,8 @@ def generate_question(topic: str, group_key: str) -> tuple[str, str] | None:
         "B) <option>\n"
         "C) <option>\n"
         "D) <option>\n"
-        "ANSWER: <single letter A, B, C, or D>"
+        "ANSWER: <single letter A, B, C, or D>\n"
+        "TOPIC: <a 2-4 word topic label summarising what THIS question is about>"
     )
     try:
         resp = ai.chat.completions.create(
@@ -288,16 +295,22 @@ def _build_quiz_button(token: str):
     return kb
 
 
-def _format_webapp_teaser(topic: str) -> str:
+def _format_webapp_teaser(topic: str, answered: int | None = None) -> str:
     """Group message for a web-app quiz — deliberately question-FREE.
 
     The question itself never appears in the group chat: that text is the
     easiest thing to copy into an external LLM. It lives only inside the Mini
     App, where we can block selection. The group gets just the title (+ the
-    broad topic, which isn't the question); the inline button does the rest.
+    short topic, which isn't the question) and — once ticks start — a live
+    "N answered" counter. The inline button does the rest.
     """
     topic_line = f"\n\n📚 Topic: <b>{_html.escape(topic)}</b>" if topic else ""
-    return f"✨✨✨ <b>QUIZ TIME!</b> ✨✨✨{topic_line}"
+    if answered is None:
+        count_line = ""
+    else:
+        noun = "student has" if answered == 1 else "students have"
+        count_line = f"\n\n👥 <b>{answered}</b> {noun} answered"
+    return f"✨✨✨ <b>QUIZ TIME!</b> ✨✨✨{topic_line}{count_line}"
 
 
 def _format_webapp_expired(topic: str) -> str:
@@ -308,13 +321,20 @@ def _format_webapp_expired(topic: str) -> str:
     )
 
 
+# Cadence for the live "N answered" counter edits (chained QStash callbacks).
+COUNT_TICK_SECONDS = 15
+
+
 def _start_webapp_quiz(
     p: Prepared, topic: str, chat_id: int | str, raw: str, correct: str, parts: dict
 ) -> None:
+    # Prefer the topic the LLM derived from its own question; fall back to the
+    # instructor's /quiz argument.
+    display_topic = parts.get("topic") or topic
     token = secrets.token_urlsafe(12)
     msg_id = send_message(
         chat_id,
-        _format_webapp_teaser(topic),
+        _format_webapp_teaser(display_topic),
         parse_mode="HTML",
         reply_markup=_build_quiz_button(token),
     )
@@ -330,7 +350,7 @@ def _start_webapp_quiz(
             "correctIndex": parts["correctIndex"],
             "question": parts["question"],
             "options": parts["options"],
-            "topic": topic,
+            "topic": display_topic,
             "mode": "webapp",
             "token": token,
             "answers": {},
@@ -343,12 +363,58 @@ def _start_webapp_quiz(
     bump_total_quizzes(p.group_key)
 
     scheduled = _schedule_autoreveal(chat_id)
+    schedule_quiz_tick(chat_id, msg_id, token)  # live answered-count updates
     send_message(
         p.user_id,
         f"✅ Web-app quiz posted (correct: <b>{correct}</b>). "
         f"{'Auto-reveal in 3 min.' if scheduled else 'QStash unavailable — reveal inline on next message.'}",
         parse_mode="HTML",
     )
+
+
+def schedule_quiz_tick(
+    chat_id: int | str, question_message_id, token: str, delay: int = COUNT_TICK_SECONDS
+) -> bool:
+    """Publish a QStash callback to refresh the answered-count in ``delay`` s."""
+    if not PUBLIC_URL:
+        return False
+    msg_id = qstash.publish(
+        f"{PUBLIC_URL}/api/quiz-tick",
+        body={
+            "chatId": str(chat_id),
+            "questionMessageId": question_message_id,
+            "token": token,
+        },
+        delay_seconds=delay,
+    )
+    return bool(msg_id)
+
+
+def tick_quiz(chat_id: int | str, question_message_id, token: str) -> bool:
+    """Refresh the teaser's "N answered" counter. Returns True to keep ticking.
+
+    Stops (returns False) when the quiz is gone, replaced by a newer one, or
+    already expired — the reveal path takes over from there.
+    """
+    active = get_active_quiz(chat_id)
+    if not active or active.get("mode") != "webapp":
+        return False
+    if active.get("questionMessageId") != question_message_id:
+        return False  # a newer quiz replaced this message
+    if is_expired(active):
+        return False
+    from bot.ta.state import count_quiz_answers
+    from bot.ta.tg import edit_message_quiet
+
+    count = count_quiz_answers(chat_id)
+    edit_message_quiet(
+        chat_id,
+        question_message_id,
+        _format_webapp_teaser(active.get("topic") or "", answered=count),
+        parse_mode="HTML",
+        reply_markup=_build_quiz_button(token),  # re-send so the button survives
+    )
+    return True
 
 
 def _load_active_for_token(token: str) -> tuple[str | None, dict | None]:
@@ -366,48 +432,77 @@ def _load_active_for_token(token: str) -> tuple[str | None, dict | None]:
     return chat_id, active
 
 
-def serve_quiz(token: str, user: dict) -> dict:
-    """Return this student's view of the quiz: stem + options in *their* order.
+def _ended_result(token: str, user: dict) -> dict | None:
+    """Build the post-quiz result a student sees (verdict + option texts).
 
-    The correct position is included ONLY if the student already answered —
-    never leak it to someone who hasn't committed yet.
+    Reads the snapshot persisted at reveal time; ``None`` if none exists yet.
+    Shown in plain option TEXT (not positions) since the quiz is over.
     """
-    if not token:
-        return {"ok": False, "error": "no_token"}
-    chat_id, active = _load_active_for_token(token)
-    if active is None:
-        return {"ok": False, "error": "ended"}
-    if is_expired(active):
-        return {"ok": False, "error": "expired"}
-    options = list(active.get("options") or [])
-    if len(options) != 4:
-        return {"ok": False, "error": "ended"}
-    uid = str(user.get("id"))
-    order = _user_option_order(chat_id, active.get("questionMessageId"), uid)
-    correct_index = int(active.get("correctIndex", 0))
-    now = int(time.time())
-    payload = {
-        "ok": True,
-        "question": active.get("question") or "",
-        "options": [options[order[pos]] for pos in range(4)],
-        "remainingSeconds": max(
-            0, QUIZ_TIMEOUT_SECONDS - (now - int(active.get("startTime") or now))
-        ),
-        "answered": False,
-    }
-    mine = get_quiz_answers(chat_id).get(uid)
-    if mine:
-        their_letter = (mine.get("letter") or "").upper()
+    from bot.ta.state import get_quiz_result
+
+    result = get_quiz_result(token)
+    if not result:
+        return None
+    options = list(result.get("options") or [])
+    ci = int(result.get("correctIndex", 0))
+    correct_option = options[ci] if 0 <= ci < len(options) else ""
+    letter = (result.get("answers", {}).get(str(user.get("id"))) or "").upper()
+    payload = {"ok": True, "state": "ended", "correctOption": correct_option}
+    if letter in ("A", "B", "C", "D"):  # note: "" in "ABCD" is True — avoid it
+        their_idx = "ABCD".index(letter)
         payload["answered"] = True
-        payload["correct"] = their_letter == "ABCD"[correct_index]
-        payload["correctPosition"] = order.index(correct_index)
-        their_index = "ABCD".index(their_letter) if their_letter in "ABCD" else -1
-        payload["yourPosition"] = order.index(their_index) if their_index >= 0 else None
+        payload["correct"] = their_idx == ci
+        payload["yourOption"] = options[their_idx] if their_idx < len(options) else ""
+    else:
+        payload["answered"] = False
     return payload
 
 
+def serve_quiz(token: str, user: dict) -> dict:
+    """Return this student's current view of the quiz as a state machine.
+
+    States: ``live`` (answer it), ``accepted`` (you've answered, waiting),
+    ``pending`` (time up, results tallying), ``ended`` (your result). The
+    verdict is NEVER returned while the quiz is live — only after it closes —
+    so an early answerer can't learn the correct option and tip off others.
+    """
+    if not token:
+        return {"ok": False, "error": "no_token"}
+    uid = str(user.get("id"))
+    chat_id, active = _load_active_for_token(token)
+    if active is not None:
+        if is_expired(active):
+            # Time's up but not yet revealed/cleared — results are tallying.
+            return _ended_result(token, user) or {"ok": True, "state": "pending"}
+        options = list(active.get("options") or [])
+        if len(options) != 4:
+            return {"ok": False, "error": "ended"}
+        remaining = max(
+            0,
+            QUIZ_TIMEOUT_SECONDS
+            - (int(time.time()) - int(active.get("startTime") or time.time())),
+        )
+        if has_quiz_answer(chat_id, uid):
+            return {"ok": True, "state": "accepted", "remainingSeconds": remaining}
+        order = _user_option_order(chat_id, active.get("questionMessageId"), uid)
+        return {
+            "ok": True,
+            "state": "live",
+            "question": active.get("question") or "",
+            "options": [options[order[pos]] for pos in range(4)],
+            "remainingSeconds": remaining,
+        }
+    # No active quiz: either it was revealed (result snapshot exists) or the
+    # token is unknown/expired.
+    return _ended_result(token, user) or {"ok": False, "error": "ended"}
+
+
 def submit_answer(token: str, user: dict, position) -> dict:
-    """Grade a student's tapped position. One-shot: first answer is final."""
+    """Record a student's tapped position. One-shot; returns only acceptance.
+
+    No verdict here — the student finds out whether they were right when the
+    quiz ends (serve_quiz → state ``ended``).
+    """
     if not token:
         return {"ok": False, "error": "no_token"}
     chat_id, active = _load_active_for_token(token)
@@ -423,24 +518,11 @@ def submit_answer(token: str, user: dict, position) -> dict:
         return {"ok": False, "error": "bad_position"}
 
     uid = str(user.get("id"))
-    order = _user_option_order(chat_id, active.get("questionMessageId"), uid)
-    correct_index = int(active.get("correctIndex", 0))
-    correct_position = order.index(correct_index)
-
-    # Idempotent: if they already answered, replay the original result rather
-    # than overwriting it (no fishing for a better grade).
+    # One-shot: first answer is final; re-taps just re-confirm acceptance.
     if has_quiz_answer(chat_id, uid):
-        mine = get_quiz_answers(chat_id).get(uid) or {}
-        their_letter = (mine.get("letter") or "").upper()
-        their_index = "ABCD".index(their_letter) if their_letter in "ABCD" else -1
-        return {
-            "ok": True,
-            "alreadyAnswered": True,
-            "correct": their_letter == "ABCD"[correct_index],
-            "yourPosition": order.index(their_index) if their_index >= 0 else None,
-            "correctPosition": correct_position,
-        }
+        return {"ok": True, "accepted": True, "alreadyAnswered": True}
 
+    order = _user_option_order(chat_id, active.get("questionMessageId"), uid)
     canonical = order[position]
     record_quiz_answer(
         chat_id,
@@ -452,12 +534,7 @@ def submit_answer(token: str, user: dict, position) -> dict:
             "ts": int(time.time()),
         },
     )
-    return {
-        "ok": True,
-        "correct": canonical == correct_index,
-        "yourPosition": position,
-        "correctPosition": correct_position,
-    }
+    return {"ok": True, "accepted": True}
 
 
 # ── Start ─────────────────────────────────────────────────────────────────
@@ -596,11 +673,27 @@ def reveal_now(chat_id: int | str) -> bool:
         label = f"{name} \U0001f525{streak}" if streak >= 2 else name
         (right if is_right else wrong).append(label)
 
-    lines = [
-        "⏰ <b>Time's up!</b>",
-        f"✅ Correct answer: <b>{correct}</b>",
-        "",
-    ]
+    # Web-app quizzes never showed the question in the group, so spell out the
+    # full question + the full correct option text at reveal. Legacy text
+    # quizzes already showed the question, so just the letter is enough.
+    if active.get("mode") == "webapp":
+        options = active.get("options") or []
+        ci = int(active.get("correctIndex", 0))
+        correct_opt = _html.escape(options[ci]) if 0 <= ci < len(options) else ""
+        lines = [
+            "⏰ <b>Time's up!</b>",
+            "",
+            f"❓ <b>{_html.escape(active.get('question') or '')}</b>",
+            "",
+            f"✅ Correct answer: <b>{_html.escape(correct)}) {correct_opt}</b>",
+            "",
+        ]
+    else:
+        lines = [
+            "⏰ <b>Time's up!</b>",
+            f"✅ Correct answer: <b>{correct}</b>",
+            "",
+        ]
     if right:
         lines.append(f"🎉 Got it right ({len(right)}): {', '.join(right)}")
     if wrong:
@@ -609,19 +702,35 @@ def reveal_now(chat_id: int | str) -> bool:
         lines.append("No one answered — better luck next time!")
     send_message(chat_id, "\n".join(lines), parse_mode="HTML")
 
-    # Web-app quizzes: rewrite the original teaser to "expired" and drop the
-    # inline button (edit with no reply_markup) so the dead quiz can't be
-    # reopened from the group. Best-effort — never fail the reveal over this.
+    # Web-app quizzes: snapshot the result (so students can see their own
+    # verdict in the app after the close), rewrite the teaser to "expired",
+    # and drop the inline button. All best-effort — never fail the reveal.
     q_msg_id = active.get("questionMessageId")
-    if active.get("mode") == "webapp" and q_msg_id:
-        from bot.ta.tg import edit_message_quiet
+    if active.get("mode") == "webapp":
+        token = active.get("token")
+        if token:
+            from bot.ta.state import set_quiz_result
 
-        edit_message_quiet(
-            chat_id,
-            q_msg_id,
-            _format_webapp_expired(active.get("topic") or ""),
-            parse_mode="HTML",
-        )
+            set_quiz_result(
+                token,
+                {
+                    "correctIndex": int(active.get("correctIndex", 0)),
+                    "options": active.get("options") or [],
+                    "answers": {
+                        uid: (data.get("letter") or "").upper()
+                        for uid, data in answers.items()
+                    },
+                },
+            )
+        if q_msg_id:
+            from bot.ta.tg import edit_message_quiet
+
+            edit_message_quiet(
+                chat_id,
+                q_msg_id,
+                _format_webapp_expired(active.get("topic") or ""),
+                parse_mode="HTML",
+            )
 
     clear_active_quiz(chat_id)
     return True

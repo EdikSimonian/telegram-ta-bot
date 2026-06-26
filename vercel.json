@@ -7,7 +7,8 @@
     { "source": "/api/git-sync-batch", "destination": "/api/git_sync_batch" },
     { "source": "/api/quiz-app", "destination": "/api/quiz_app" },
     { "source": "/api/quiz/question", "destination": "/api/quiz_app" },
-    { "source": "/api/quiz/answer", "destination": "/api/quiz_app" }
+    { "source": "/api/quiz/answer", "destination": "/api/quiz_app" },
+    { "source": "/api/quiz-tick", "destination": "/api/quiz_tick" }
   ],
   "functions": {
     "api/index.py": {
@@ -28,6 +29,10 @@
     },
     "api/quiz_app.py": {
       "maxDuration": 15,
+      "runtime": "@vercel/python@4.3.0"
+    },
+    "api/quiz_tick.py": {
+      "maxDuration": 10,
       "runtime": "@vercel/python@4.3.0"
     }
   }
