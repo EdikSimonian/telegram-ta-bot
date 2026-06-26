@@ -276,6 +276,86 @@ def test_admin_dm_still_works_when_dms_disabled():
         _exit(stack)
 
 
+# ── Rule 0: /feedback bypasses the DM gate (students can always give feedback)
+def test_student_feedback_in_dm_works_when_dms_disabled():
+    # Even a student who has never DMed the bot (welcome not yet sent) and with
+    # DMs disabled must be able to leave private feedback in a DM.
+    stack = _patches(welcomed_already=False)
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.DMS_ENABLED", False),
+            patch("bot.ta.admin.send_message") as send,
+            patch("bot.ta.state.add_feedback") as add_fb,
+            patch("bot.ta.admin._answer_question") as ans,
+        ):
+            from bot.ta.admin import route
+
+            route(
+                _msg(
+                    chat_type="private",
+                    chat_id=42,
+                    username="bob",
+                    text="/feedback the pace is too fast",
+                )
+            )
+            add_fb.assert_called_once()
+            assert add_fb.call_args.args[0] == "the pace is too fast"
+            # Student is thanked, NOT declined with the "DMs are off" message.
+            assert any(
+                "feedback received" in str(c).lower() for c in send.call_args_list
+            )
+            assert not any("turned off" in str(c).lower() for c in send.call_args_list)
+            ans.assert_not_called()
+    finally:
+        _exit(stack)
+
+
+def test_student_feedback_in_dm_empty_shows_usage():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.DMS_ENABLED", False),
+            patch("bot.ta.admin.send_message") as send,
+            patch("bot.ta.state.add_feedback") as add_fb,
+        ):
+            from bot.ta.admin import route
+
+            route(
+                _msg(chat_type="private", chat_id=42, username="bob", text="/feedback")
+            )
+            add_fb.assert_not_called()  # nothing to store
+            assert any("usage" in str(c).lower() for c in send.call_args_list)
+    finally:
+        _exit(stack)
+
+
+def test_student_feedback_in_group_deletes_and_stores():
+    stack = _patches(welcomed_already=True)
+    _enter(stack)
+    try:
+        with (
+            patch("bot.ta.admin.delete_message") as d,
+            patch("bot.ta.admin.send_message"),
+            patch("bot.ta.state.add_feedback") as add_fb,
+        ):
+            from bot.ta.admin import route
+
+            route(
+                _msg(
+                    chat_type="supergroup",
+                    username="bob",
+                    text="/feedback great course",
+                )
+            )
+            d.assert_called_once()  # command message removed for privacy
+            add_fb.assert_called_once()
+            assert add_fb.call_args.args[0] == "great course"
+    finally:
+        _exit(stack)
+
+
 # ── Rule 4: admin command in group → delete + dispatch ────────────────────
 def test_admin_command_in_group_deletes_and_dispatches():
     stack = _patches(is_admin=True)

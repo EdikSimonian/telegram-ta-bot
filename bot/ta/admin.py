@@ -72,10 +72,32 @@ def route(message) -> None:
     except Exception:
         traceback.print_exc()
 
+    # 0. /feedback is open to EVERYONE (students included) and is handled before
+    #    the DM gate + welcome gates, so a student can always leave private
+    #    feedback in a DM even when DMs are otherwise disabled. In a group the
+    #    command message is deleted for privacy and the reply is DM'd back.
+    if p.is_command and p.command == "feedback":
+        if not p.is_dm:
+            delete_message(p.chat_id, p.message.message_id)
+        if p.is_admin:
+            # Admins get the full sub-commands (list / clear / submit).
+            commands.dispatch(p)
+        else:
+            from bot.ta.state import add_feedback
+
+            text = (p.command_args or "").strip()
+            if not text:
+                send_message(p.user_id, "Usage: /feedback <text>")
+            else:
+                add_feedback(text, p.username)
+                send_message(p.user_id, "✅ Feedback received. Thank you!")
+        return
+
     # 1. DM gate: when DMs are disabled, students can't use the bot in private
     #    chat — decline and point them back to the group. Admins are always
     #    allowed through (they need DMs for /announce, /dm, and confirmation
-    #    flows). Checked first so even /start and /feedback are declined.
+    #    flows). /feedback is handled above, so students can still leave private
+    #    feedback with DMs off; /start and free-text are declined.
     if p.is_dm and not p.is_admin and not DMS_ENABLED:
         send_message(
             p.chat_id,
@@ -116,27 +138,6 @@ def route(message) -> None:
             return
         # Unrecognized reply → fall through to normal processing without
         # clearing the pending state (spec §5.12).
-
-    # 3b. /feedback is open to ALL users (students included).
-    #     Handle it before the admin gate so non-admins aren't blocked.
-    if p.is_command and p.command == "feedback":
-        if not p.is_dm:
-            # In groups: delete for privacy, reply via DM.
-            delete_message(p.chat_id, p.message.message_id)
-        if p.is_admin:
-            # Admins get the full sub-commands (list, clear, submit).
-            commands.dispatch(p)
-        else:
-            # Students: store the feedback text.
-            from bot.ta.state import add_feedback
-
-            text = (p.command_args or "").strip()
-            if not text:
-                send_message(p.user_id, "Usage: /feedback <text>")
-            else:
-                add_feedback(text, p.username)
-                send_message(p.user_id, "\u2705 Feedback received. Thank you!")
-        return
 
     # 4. Admin + command.
     if p.is_admin and p.is_command:
