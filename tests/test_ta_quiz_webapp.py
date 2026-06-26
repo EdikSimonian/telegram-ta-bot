@@ -3,9 +3,20 @@
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 CHAT = -100123
 MSG = 77
 RAW = "QUESTION: What is 2+2?\nA) 3\nB) 4\nC) 5\nD) 22\nANSWER: B"
+
+
+@pytest.fixture(autouse=True)
+def _allow_membership():
+    """Default every test to "caller is a group member" so the anti-share gate
+    in serve_quiz/submit_answer passes. Tests that exercise the gate itself
+    re-patch is_chat_member=False locally (the inner patch wins)."""
+    with patch("bot.ta.quiz.is_chat_member", return_value=True):
+        yield
 
 
 def _prepared(*, user_id=42, is_dm=True):
@@ -96,7 +107,7 @@ def test_submit_correct_position_scores_right():
     order = _user_option_order(CHAT, MSG, 42)
     correct_pos = order.index(1)  # canonical index 1 == "B"
     p1, p2, p3, p4 = _patches(active)
-    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer") as rec:
+    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer_nx") as rec:
         out = submit_answer("tok123", {"id": 42, "first_name": "Alice"}, correct_pos)
     assert out["ok"] is True
     assert out["accepted"] is True
@@ -112,7 +123,7 @@ def test_submit_wrong_position_scores_wrong():
     order = _user_option_order(CHAT, MSG, 42)
     wrong_pos = (order.index(1) + 1) % 4
     p1, p2, p3, p4 = _patches(active)
-    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer") as rec:
+    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer_nx") as rec:
         out = submit_answer("tok123", {"id": 42}, wrong_pos)
     assert out["accepted"] is True
     assert "correct" not in out  # no verdict at answer time
@@ -125,7 +136,7 @@ def test_submit_is_one_shot():
     active = _active()
     answers = {"42": {"letter": "A"}}  # already answered with canonical "A"
     p1, p2, p3, p4 = _patches(active, answered=True, answers=answers)
-    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer") as rec:
+    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer_nx") as rec:
         out = submit_answer("tok123", {"id": 42}, 0)
     assert out["accepted"] is True
     assert out["alreadyAnswered"] is True
@@ -171,7 +182,7 @@ def test_submit_rejects_out_of_range_position():
 
     active = _active()
     p1, p2, p3, p4 = _patches(active)
-    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer"):
+    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer_nx"):
         assert submit_answer("tok123", {"id": 42}, 9)["error"] == "bad_position"
 
 
@@ -455,3 +466,115 @@ def test_reveal_webapp_message_has_question_and_full_answer():
         text = sm.call_args.args[1]
         assert "What is 2+2?" in text  # full question text
         assert "B) 4" in text  # full correct option, not just the letter
+
+
+# ── anti-share membership gate ────────────────────────────────────────────
+def test_submit_denied_for_non_member():
+    from bot.ta.quiz import submit_answer
+
+    active = _active()
+    p1, p2, p3, p4 = _patches(active)
+    with p1, p2, p3, p4, patch("bot.ta.quiz.is_chat_member", return_value=False):
+        out = submit_answer("tok123", {"id": 999}, 0)
+    assert out["ok"] is False
+    assert out["error"] == "not_member"
+
+
+def test_serve_denied_for_non_member():
+    from bot.ta.quiz import serve_quiz
+
+    active = _active()
+    p1, p2, p3, p4 = _patches(active)
+    with p1, p2, p3, p4, patch("bot.ta.quiz.is_chat_member", return_value=False):
+        out = serve_quiz("tok123", {"id": 999})
+    assert out["ok"] is False
+    assert out["error"] == "not_member"
+
+
+def test_permanent_admin_bypasses_membership():
+    from bot.ta.quiz import serve_quiz
+
+    active = _active()
+    p1, p2, p3, p4 = _patches(active)
+    # Admin id matches → access granted even though membership lookup says no.
+    with (
+        p1,
+        p2,
+        p3,
+        p4,
+        patch("bot.ta.quiz.PERMANENT_ADMIN_ID", 555),
+        patch("bot.ta.quiz.is_chat_member", return_value=False),
+    ):
+        out = serve_quiz("tok123", {"id": 555})
+    assert out["state"] == "live"
+
+
+# ── atomic one-shot (HSETNX race) ─────────────────────────────────────────
+def test_submit_atomic_loser_is_already_answered():
+    from bot.ta.quiz import submit_answer
+
+    active = _active()
+    # Fast-path check misses (answered=False) but the atomic insert loses the
+    # race with the student's own concurrent tap → treated as already answered.
+    p1, p2, p3, p4 = _patches(active, answered=False)
+    with p1, p2, p3, p4, patch("bot.ta.quiz.record_quiz_answer_nx", return_value=False):
+        out = submit_answer("tok123", {"id": 42}, 0)
+    assert out["accepted"] is True
+    assert out["alreadyAnswered"] is True
+
+
+# ── reveal idempotency claim ──────────────────────────────────────────────
+def test_reveal_double_claim_short_circuits():
+    active = _active(questionMessageId=699)
+    with (
+        patch("bot.ta.quiz.get_active_quiz", return_value=active),
+        patch("bot.ta.quiz.claim_reveal", return_value=False),  # another reveal won
+        patch("bot.ta.quiz.send_message") as sm,
+        patch("bot.ta.quiz.record_quiz_score") as score,
+        patch("bot.ta.quiz.clear_active_quiz") as clear,
+    ):
+        from bot.ta.quiz import reveal_now
+
+        assert reveal_now(CHAT) is False
+        sm.assert_not_called()  # no duplicate group post
+        score.assert_not_called()  # no double scoring
+        clear.assert_not_called()
+
+
+# ── tick idempotency claim ────────────────────────────────────────────────
+def test_tick_quiz_dedup_duplicate_seq_stops():
+    active = _active(questionMessageId=MSG)
+    with (
+        patch("bot.ta.quiz.get_active_quiz", return_value=active),
+        patch("bot.ta.quiz.claim_quiz_tick", return_value=False),  # duplicate seq
+        patch("bot.ta.tg.edit_message_quiet") as edit,
+    ):
+        from bot.ta.quiz import tick_quiz
+
+        assert tick_quiz(CHAT, MSG, "tok123", 5) is False
+        edit.assert_not_called()  # the original tick already handled this seq
+
+
+# ── stale-quiz recovery on /quiz ──────────────────────────────────────────
+def test_start_quiz_reveals_expired_existing_then_continues():
+    stale = _active(startTime=1)  # expired, never revealed (autoreveal dropped)
+    with (
+        patch("bot.ta.quiz.QUIZ_WEBAPP_ENABLED", True),
+        patch("bot.ta.quiz.get_active_quiz", return_value=stale),
+        patch("bot.ta.quiz.reveal_now") as rev,
+        patch("bot.ta.quiz.clear_quiz_answers") as clear_ans,
+        patch("bot.ta.quiz.generate_question", return_value=(RAW, "B")),
+        patch("bot.ta.quiz.send_message", return_value=MSG),
+        patch("bot.ta.quiz.set_active_quiz") as set_q,
+        patch("bot.ta.quiz.set_quiz_token"),
+        patch("bot.ta.quiz.push_quiz_history"),
+        patch("bot.ta.quiz.bump_total_quizzes"),
+        patch("bot.ta.quiz._schedule_autoreveal", return_value=True),
+        patch("bot.ta.quiz.schedule_quiz_tick"),
+    ):
+        from bot.ta.quiz import start_quiz
+
+        start_quiz(_prepared(), "math", CHAT)
+        rev.assert_called_once_with(CHAT)  # stale quiz closed out, not wedged
+        clear_ans.assert_called_once_with(CHAT)  # clean slate for the new quiz
+        set_q.assert_called_once()  # the new quiz still started

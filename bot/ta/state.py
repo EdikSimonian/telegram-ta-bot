@@ -107,6 +107,16 @@ def _k_quiz_token(token: str) -> str:
     return f"{_P}quizToken:{token}"
 
 
+def _k_quiz_reveal(chat_id: int | str, message_id: int | str) -> str:
+    """Single-winner claim key for revealing one quiz (idempotency lock)."""
+    return f"{_P}quizReveal:{chat_id}:{message_id}"
+
+
+def _k_quiz_tick(chat_id: int | str, token: str, seq: int | str) -> str:
+    """Single-winner claim key for one tick of a quiz's live counter."""
+    return f"{_P}quizTick:{chat_id}:{token}:{seq}"
+
+
 def _k_pending_announcement(admin_id: int | str) -> str:
     return f"{_P}pendingAnnouncement:{admin_id}"
 
@@ -757,8 +767,17 @@ def push_quiz_history(group_key: str, question_line: str) -> None:
 
 
 # ── Active quiz per chat ──────────────────────────────────────────────────
+# Backstop TTL on the active-quiz key: if every reveal path is missed (QStash
+# autoreveal dropped AND no further group message triggers the inline reveal),
+# the key still self-expires instead of wedging `/quiz` forever. Generous —
+# the normal lifetime is a few minutes; this only catches truly-abandoned quizzes.
+ACTIVE_QUIZ_TTL = 86400  # 24h
+
+
 def set_active_quiz(chat_id: int | str, data: dict) -> None:
-    _safe(lambda: redis.set(_k_active_quiz(chat_id), json.dumps(data)))
+    _safe(
+        lambda: redis.set(_k_active_quiz(chat_id), json.dumps(data), ex=ACTIVE_QUIZ_TTL)
+    )
 
 
 def get_active_quiz(chat_id: int | str) -> dict | None:
@@ -787,6 +806,23 @@ def clear_active_quiz(chat_id: int | str) -> None:
 def record_quiz_answer(chat_id: int | str, user_id: int | str, data: dict) -> None:
     payload = json.dumps(data)
     _safe(lambda: redis.hset(_k_quiz_answers(chat_id), values={str(user_id): payload}))
+
+
+def record_quiz_answer_nx(chat_id: int | str, user_id: int | str, data: dict) -> bool:
+    """Atomically record a student's FIRST answer; True if it was inserted.
+
+    Uses ``HSETNX`` so two concurrent requests from the same student can't both
+    pass a separate ``has_quiz_answer`` check and double-write — the loser gets
+    ``False`` and is treated as already-answered. This is the real one-shot
+    enforcement (the ``has_quiz_answer`` pre-check is just a fast path). When
+    Redis is unavailable the default ``True`` keeps the stateless flow working.
+    """
+    payload = json.dumps(data)
+    inserted = _safe(
+        lambda: redis.hsetnx(_k_quiz_answers(chat_id), str(user_id), payload),
+        default=True,
+    )
+    return bool(inserted)
 
 
 def get_quiz_answers(chat_id: int | str) -> dict[str, dict]:
@@ -821,6 +857,45 @@ def has_quiz_answer(chat_id: int | str, user_id: int | str) -> bool:
 def count_quiz_answers(chat_id: int | str) -> int:
     """Number of distinct students who've answered the active quiz."""
     return int(_safe(lambda: redis.hlen(_k_quiz_answers(chat_id)), default=0) or 0)
+
+
+# ── Single-winner claims (idempotency under concurrent callbacks) ─────────
+def claim_reveal(chat_id: int | str, message_id: int | str, ttl: int = 900) -> bool:
+    """Atomically claim the right to reveal one quiz. True = caller won.
+
+    Reveal does scoring + streak bumps + a group post, none of which is
+    idempotent. Two concurrent triggers (a QStash retry overlapping the first
+    callback, or ``/reveal`` racing the scheduled autoreveal) could otherwise
+    both pass the "active quiz exists" check and double-post / double-score.
+    The first ``SET NX`` wins; losers get ``False`` and must bail. When Redis is
+    down the default ``True`` preserves the single-process stateless behavior.
+    """
+    return bool(
+        _safe(
+            lambda: redis.set(
+                _k_quiz_reveal(chat_id, message_id), "1", nx=True, ex=ttl
+            ),
+            default=True,
+        )
+    )
+
+
+def claim_quiz_tick(
+    chat_id: int | str, token: str, seq: int | str, ttl: int = 300
+) -> bool:
+    """Atomically claim one tick of a quiz's live counter. True = caller won.
+
+    Each tick reschedules the next, so a QStash retry / duplicate delivery of
+    the same ``seq`` would otherwise fork a second tick chain (redundant edits +
+    extra QStash messages). Only the invocation that claims ``seq`` edits and
+    reschedules; duplicates get ``False`` and stop.
+    """
+    return bool(
+        _safe(
+            lambda: redis.set(_k_quiz_tick(chat_id, token, seq), "1", nx=True, ex=ttl),
+            default=True,
+        )
+    )
 
 
 # ── Quiz Mini App launch tokens ───────────────────────────────────────────

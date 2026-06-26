@@ -59,9 +59,11 @@ def quiz_question():
         )
         return jsonify(ok=False, error="unauthorized"), 401
     token = _launch_token(auth, data)
+    # Never log the token itself — it's the bearer capability for this quiz.
+    # A short prefix is enough to correlate logs without leaking access.
     print(
         f"[quiz_app] question: ok signedParam={bool(auth.get('start_param'))} "
-        f"bodyParam={bool(data.get('startParam'))} token={token!r}"
+        f"bodyParam={bool(data.get('startParam'))} token~={token[:4] + '…' if token else '(none)'}"
     )
     return jsonify(quiz.serve_quiz(token, auth["user"]))
 

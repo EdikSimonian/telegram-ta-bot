@@ -28,9 +28,15 @@ def quiz_tick():
     chat_id = payload.get("chatId")
     q_msg_id = payload.get("questionMessageId")
     token = payload.get("token")
+    try:
+        seq = int(payload.get("seq", 0) or 0)
+    except (TypeError, ValueError):
+        seq = 0
     if not chat_id or not token:
         return ("bad request", 400)
 
-    if tick_quiz(chat_id, q_msg_id, token):
-        schedule_quiz_tick(chat_id, q_msg_id, token)  # keep the counter live
+    # tick_quiz claims this seq; only the winning delivery schedules seq+1, so a
+    # QStash retry can't fork a second tick chain.
+    if tick_quiz(chat_id, q_msg_id, token, seq):
+        schedule_quiz_tick(chat_id, q_msg_id, token, seq + 1)  # keep the counter live
     return ("ok", 200)

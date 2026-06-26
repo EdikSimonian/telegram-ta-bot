@@ -22,6 +22,7 @@ from bot.clients import ai
 from bot.config import (
     DEFAULT_MODEL,
     MINIAPP_SHORT_NAME,
+    PERMANENT_ADMIN_ID,
     PUBLIC_URL,
     QUIZ_MODEL,
     QUIZ_TIMEOUT_MINUTES,
@@ -33,7 +34,10 @@ from bot import qstash
 from bot.ta.prepare import Prepared
 from bot.ta.state import (
     bump_total_quizzes,
+    claim_quiz_tick,
+    claim_reveal,
     clear_active_quiz,
+    clear_quiz_answers,
     get_active_quiz,
     get_quiz_answers,
     get_quiz_history,
@@ -41,12 +45,13 @@ from bot.ta.state import (
     has_quiz_answer,
     push_quiz_history,
     record_quiz_answer,
+    record_quiz_answer_nx,
     record_quiz_score,
     set_active_quiz,
     set_quiz_token,
     update_streak,
 )
-from bot.ta.tg import send_message, set_reaction
+from bot.ta.tg import is_chat_member, send_message, set_reaction
 
 
 # ── Answer regex cascade (§5.5) ──────────────────────────────────────────
@@ -373,9 +378,18 @@ def _start_webapp_quiz(
 
 
 def schedule_quiz_tick(
-    chat_id: int | str, question_message_id, token: str, delay: int = COUNT_TICK_SECONDS
+    chat_id: int | str,
+    question_message_id,
+    token: str,
+    seq: int = 0,
+    delay: int = COUNT_TICK_SECONDS,
 ) -> bool:
-    """Publish a QStash callback to refresh the answered-count in ``delay`` s."""
+    """Publish a QStash callback to refresh the answered-count in ``delay`` s.
+
+    ``seq`` is a monotonically increasing tick number used for idempotency: the
+    next tick is scheduled as ``seq + 1``, and each tick claims its ``seq`` once
+    so a QStash retry/duplicate can't fork a second tick chain.
+    """
     if not PUBLIC_URL:
         return False
     msg_id = qstash.publish(
@@ -384,17 +398,22 @@ def schedule_quiz_tick(
             "chatId": str(chat_id),
             "questionMessageId": question_message_id,
             "token": token,
+            "seq": seq,
         },
         delay_seconds=delay,
     )
     return bool(msg_id)
 
 
-def tick_quiz(chat_id: int | str, question_message_id, token: str) -> bool:
+def tick_quiz(
+    chat_id: int | str, question_message_id, token: str, seq: int = 0
+) -> bool:
     """Refresh the teaser's "N answered" counter. Returns True to keep ticking.
 
-    Stops (returns False) when the quiz is gone, replaced by a newer one, or
-    already expired — the reveal path takes over from there.
+    Stops (returns False) when the quiz is gone, replaced by a newer one,
+    already expired, or when this ``seq`` was already handled by another
+    delivery of the same callback (idempotency) — the reveal path / the winning
+    tick takes over from there.
     """
     active = get_active_quiz(chat_id)
     if not active or active.get("mode") != "webapp":
@@ -403,6 +422,8 @@ def tick_quiz(chat_id: int | str, question_message_id, token: str) -> bool:
         return False  # a newer quiz replaced this message
     if is_expired(active):
         return False
+    if not claim_quiz_tick(chat_id, token, seq):
+        return False  # duplicate delivery — the original tick handles the chain
     from bot.ta.state import count_quiz_answers
     from bot.ta.tg import edit_message_quiet
 
@@ -458,6 +479,22 @@ def _ended_result(token: str, user: dict) -> dict | None:
     return payload
 
 
+def _quiz_access_ok(chat_id: int | str, user: dict) -> bool:
+    """Gate Mini App access to members of the quiz's group (anti-share).
+
+    A valid ``initData`` only proves the caller is *some* real Telegram user for
+    this bot — not that they belong to the quiz's group. Without this, a student
+    could forward the ``t.me/<bot>/quiz?startapp=<token>`` link to an outside
+    account (or a second account) and answer, defeating the per-user shuffle.
+    The permanent admin always passes (they run quizzes in groups they belong to
+    anyway; this just avoids a lockout if the membership lookup ever flakes).
+    """
+    uid = user.get("id")
+    if PERMANENT_ADMIN_ID and str(uid) == str(PERMANENT_ADMIN_ID):
+        return True
+    return is_chat_member(chat_id, uid)
+
+
 def serve_quiz(token: str, user: dict) -> dict:
     """Return this student's current view of the quiz as a state machine.
 
@@ -473,7 +510,12 @@ def serve_quiz(token: str, user: dict) -> dict:
     if active is not None:
         if is_expired(active):
             # Time's up but not yet revealed/cleared — results are tallying.
+            # No membership gate on this poll path: the answer is about to be
+            # public anyway, and the app polls it repeatedly near the close.
             return _ended_result(token, user) or {"ok": True, "state": "pending"}
+        # Live window: gate the question + option order to group members only.
+        if not _quiz_access_ok(chat_id, user):
+            return {"ok": False, "error": "not_member"}
         options = list(active.get("options") or [])
         if len(options) != 4:
             return {"ok": False, "error": "ended"}
@@ -510,6 +552,8 @@ def submit_answer(token: str, user: dict, position) -> dict:
         return {"ok": False, "error": "ended"}
     if is_expired(active):
         return {"ok": False, "error": "expired"}
+    if not _quiz_access_ok(chat_id, user):
+        return {"ok": False, "error": "not_member"}
     try:
         position = int(position)
     except (TypeError, ValueError):
@@ -518,13 +562,13 @@ def submit_answer(token: str, user: dict, position) -> dict:
         return {"ok": False, "error": "bad_position"}
 
     uid = str(user.get("id"))
-    # One-shot: first answer is final; re-taps just re-confirm acceptance.
+    # Fast path for re-taps; the atomic insert below is the real one-shot gate.
     if has_quiz_answer(chat_id, uid):
         return {"ok": True, "accepted": True, "alreadyAnswered": True}
 
     order = _user_option_order(chat_id, active.get("questionMessageId"), uid)
     canonical = order[position]
-    record_quiz_answer(
+    inserted = record_quiz_answer_nx(
         chat_id,
         uid,
         {
@@ -534,18 +578,33 @@ def submit_answer(token: str, user: dict, position) -> dict:
             "ts": int(time.time()),
         },
     )
+    if not inserted:
+        # Lost a race with this student's own concurrent tap — already recorded.
+        return {"ok": True, "accepted": True, "alreadyAnswered": True}
     return {"ok": True, "accepted": True}
 
 
 # ── Start ─────────────────────────────────────────────────────────────────
 def start_quiz(p: Prepared, topic: str, chat_id: int | str) -> None:
     """/quiz handler. Caller is responsible for admin gating."""
-    if get_active_quiz(chat_id) is not None:
-        send_message(
-            p.user_id,
-            "A quiz is already active in that chat. Use /reveal first.",
-        )
-        return
+    existing = get_active_quiz(chat_id)
+    if existing is not None:
+        if is_expired(existing):
+            # A prior quiz that never got revealed (autoreveal dropped, group
+            # went quiet) would otherwise wedge /quiz forever. Close it out
+            # (posts its results + clears state) and continue with the new one.
+            reveal_now(chat_id)
+        else:
+            send_message(
+                p.user_id,
+                "A quiz is already active in that chat. Use /reveal first.",
+            )
+            return
+
+    # Clean slate: drop any answers left over from a previous quiz in this chat
+    # (e.g. a late submit that landed just after the prior reveal cleared) so
+    # they can't be counted or scored against the new quiz.
+    clear_quiz_answers(chat_id)
 
     gen = generate_question(topic, p.group_key)
     if gen is None:
@@ -642,12 +701,19 @@ def react_quiet(p: Prepared) -> None:
 def reveal_now(chat_id: int | str) -> bool:
     """End the active quiz in ``chat_id`` and post results.
 
-    Idempotent: if no active quiz, returns False without side effects.
-    Updates per-group scores as a side effect.
+    Idempotent: returns False without side effects if there's no active quiz,
+    or if another reveal already claimed this quiz (a QStash retry overlapping
+    the first callback, or ``/reveal`` racing the scheduled autoreveal). Scoring
+    + streak bumps + the group post are not individually idempotent, so a
+    single-winner ``claim_reveal`` lock guards them. Updates per-group scores as
+    a side effect.
     """
     active = get_active_quiz(chat_id)
     if not active:
         return False
+    q_msg_id = active.get("questionMessageId")
+    if not claim_reveal(chat_id, q_msg_id):
+        return False  # another reveal already won — don't double-post/score
     correct = active.get("correctAnswer") or ""
     # Merge: new HSET-based store + any legacy in-dict answers from quizzes
     # that were active at deploy time. The hash wins on user_id collisions.
@@ -705,7 +771,7 @@ def reveal_now(chat_id: int | str) -> bool:
     # Web-app quizzes: snapshot the result (so students can see their own
     # verdict in the app after the close), rewrite the teaser to "expired",
     # and drop the inline button. All best-effort — never fail the reveal.
-    q_msg_id = active.get("questionMessageId")
+    # (q_msg_id was captured above for the reveal claim.)
     if active.get("mode") == "webapp":
         token = active.get("token")
         if token:

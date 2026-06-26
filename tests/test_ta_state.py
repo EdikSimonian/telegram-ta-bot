@@ -489,3 +489,74 @@ def test_clear_feedback_deletes_key():
 
         clear_feedback()
         r.delete.assert_called_with("ta:feedback")
+
+
+# ── Quiz hardening: TTL, atomic insert, single-winner claims ──────────────
+def test_set_active_quiz_has_ttl():
+    r = _fresh_redis()
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import ACTIVE_QUIZ_TTL, set_active_quiz
+
+        set_active_quiz(-100, {"a": 1})
+        _, kwargs = r.set.call_args
+        assert kwargs.get("ex") == ACTIVE_QUIZ_TTL  # backstop TTL, no orphan keys
+
+
+def test_record_quiz_answer_nx_uses_hsetnx_and_returns_bool():
+    r = _fresh_redis()
+    r.hsetnx.return_value = 1  # inserted
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import record_quiz_answer_nx
+
+        assert record_quiz_answer_nx(-100, 42, {"letter": "B"}) is True
+        key, field, _val = r.hsetnx.call_args.args
+        assert key == "ta:quizAnswers:-100" and field == "42"
+
+
+def test_record_quiz_answer_nx_false_when_already_present():
+    r = _fresh_redis()
+    r.hsetnx.return_value = 0  # field already existed → not inserted
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import record_quiz_answer_nx
+
+        assert record_quiz_answer_nx(-100, 42, {"letter": "B"}) is False
+
+
+def test_claim_reveal_is_set_nx():
+    r = _fresh_redis()
+    r.set.return_value = True  # claim won
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import claim_reveal
+
+        assert claim_reveal(-100, 7) is True
+        args, kwargs = r.set.call_args
+        assert args[0] == "ta:quizReveal:-100:7"
+        assert kwargs.get("nx") is True and kwargs.get("ex")
+
+
+def test_claim_reveal_false_when_already_claimed():
+    r = _fresh_redis()
+    r.set.return_value = None  # SET NX returns nil when key exists
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import claim_reveal
+
+        assert claim_reveal(-100, 7) is False
+
+
+def test_claim_reveal_defaults_true_when_stateless():
+    with patch("bot.ta.state.redis", None):
+        from bot.ta.state import claim_reveal
+
+        assert claim_reveal(-100, 7) is True  # don't block reveal with no Redis
+
+
+def test_claim_quiz_tick_is_set_nx_per_seq():
+    r = _fresh_redis()
+    r.set.return_value = True
+    with patch("bot.ta.state.redis", r):
+        from bot.ta.state import claim_quiz_tick
+
+        assert claim_quiz_tick(-100, "tok", 3) is True
+        args, kwargs = r.set.call_args
+        assert args[0] == "ta:quizTick:-100:tok:3"
+        assert kwargs.get("nx") is True

@@ -129,6 +129,29 @@ def edit_message(chat_id: int | str, message_id: int, text: str, **kwargs) -> bo
         return False
 
 
+def is_chat_member(chat_id: int | str, user_id: int | str) -> bool:
+    """True if ``user_id`` is currently in ``chat_id``.
+
+    Anti-share gate for Mini App quizzes: a validated Telegram user is only
+    allowed to fetch/answer a quiz if they actually belong to that quiz's group,
+    so forwarding the launch link to an outsider (or a second account) doesn't
+    work. Fail-closed: any error, or a ``left``/``kicked`` status, is treated as
+    not-a-member.
+    """
+    try:
+        member = bot.get_chat_member(chat_id, int(user_id))
+    except Exception as e:
+        print(f"[ta.tg] is_chat_member error chat={chat_id} user={user_id}: {e}")
+        return False
+    status = getattr(member, "status", None)
+    if status in ("creator", "administrator", "member"):
+        return True
+    if status == "restricted":
+        # Restricted members are still in the group iff is_member is set.
+        return bool(getattr(member, "is_member", False))
+    return False
+
+
 def edit_message_quiet(
     chat_id: int | str, message_id: int, text: str, **kwargs
 ) -> bool:
