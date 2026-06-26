@@ -264,12 +264,25 @@ _PAGE_HTML = """<!doctype html>
   }
 
   function renderAccepted(remaining) {
-    reset();
+    clearTimers(); reset();
     resultEl.textContent = "✅ Response accepted";
     resultEl.style.color = "var(--ok)";
-    detailEl.textContent = "Sit tight — you'll find out if you got it right when the quiz ends.";
+    detailEl.textContent = "Your answer is locked in. You'll see results when the quiz ends.";
     detailEl.classList.remove("hidden");
-    startCountdown(remaining, pollForResult);
+    // You're done here — close the Mini App after a short countdown.
+    var secs = 5;
+    function tick() {
+      if (secs <= 0) {
+        clearTimers();
+        timerEl.textContent = "";
+        try { tg.close(); } catch (_) {}
+        return;
+      }
+      timerEl.textContent = "Closing in " + secs + "…";
+      secs -= 1;
+    }
+    tick();
+    countdown = setInterval(tick, 1000);
   }
 
   function renderPending() {
